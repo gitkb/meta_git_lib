@@ -6,17 +6,86 @@ use std::process::{Command, Stdio};
 
 use super::types::GitStatusSummary;
 
+const GIT_LOCAL_ENV_VARS: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+];
+
+fn clear_git_local_env(command: &mut Command) {
+    for key in GIT_LOCAL_ENV_VARS {
+        command.env_remove(key);
+    }
+}
+
+fn git_command(repo_path: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(repo_path);
+    clear_git_local_env(&mut command);
+    command
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn ensure_checkout_config_is_not_bare(repo_path: &Path) -> Result<()> {
+    if !repo_path.join(".git").exists() {
+        return Ok(());
+    }
+
+    let output = git_command(repo_path)
+        .args(["config", "--local", "--bool", "--get", "core.bare"])
+        .output()?;
+
+    if output.status.success() {
+        let value = String::from_utf8_lossy(&output.stdout);
+        if value.trim() == "true" {
+            anyhow::bail!(
+                "Repository '{}' is a checked-out work tree but its shared Git config has \
+                 core.bare=true.\nRepair it with:\n  git -C {} config --local core.bare false",
+                repo_path.display(),
+                shell_quote_path(repo_path)
+            );
+        }
+    } else if output.status.code() != Some(1) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "Failed to inspect core.bare for '{}': {}",
+            repo_path.display(),
+            stderr.trim()
+        );
+    }
+
+    Ok(())
+}
+
 pub fn git_worktree_add(
     repo_path: &Path,
     worktree_dest: &Path,
     branch: &str,
     from_ref: Option<&str>,
 ) -> Result<bool> {
+    ensure_checkout_config_is_not_bare(repo_path)?;
+
     // If from_ref is specified, verify it exists in this repo
     if let Some(ref_name) = from_ref {
-        let ref_exists = Command::new("git")
+        let ref_exists = git_command(repo_path)
             .args(["rev-parse", "--verify", ref_name])
-            .current_dir(repo_path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()?
@@ -31,7 +100,7 @@ pub fn git_worktree_add(
         }
 
         // Create branch from the specified ref
-        let output = Command::new("git")
+        let output = git_command(repo_path)
             .args([
                 "worktree",
                 "add",
@@ -40,7 +109,6 @@ pub fn git_worktree_add(
                 &worktree_dest.to_string_lossy(),
                 ref_name,
             ])
-            .current_dir(repo_path)
             .output()?;
 
         if !output.status.success() {
@@ -57,9 +125,8 @@ pub fn git_worktree_add(
     }
 
     // Check if branch exists locally
-    let branch_exists = Command::new("git")
+    let branch_exists = git_command(repo_path)
         .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
-        .current_dir(repo_path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()?
@@ -67,13 +134,12 @@ pub fn git_worktree_add(
 
     // Also check if branch exists on remote
     let remote_branch_exists = if !branch_exists {
-        Command::new("git")
+        git_command(repo_path)
             .args([
                 "rev-parse",
                 "--verify",
                 &format!("refs/remotes/origin/{branch}"),
             ])
-            .current_dir(repo_path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()?
@@ -104,10 +170,7 @@ pub fn git_worktree_add(
         vec!["worktree", "add", "-b", branch, &dest_str]
     };
 
-    let output = Command::new("git")
-        .args(&wt_args)
-        .current_dir(repo_path)
-        .output()?;
+    let output = git_command(repo_path).args(&wt_args).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -132,10 +195,7 @@ pub fn git_worktree_remove(repo_path: &Path, worktree_path: &Path, force: bool) 
     let wt_str = worktree_path.to_string_lossy();
     args.push(&wt_str);
 
-    let output = Command::new("git")
-        .args(&args)
-        .current_dir(repo_path)
-        .output()?;
+    let output = git_command(repo_path).args(&args).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -145,10 +205,20 @@ pub fn git_worktree_remove(repo_path: &Path, worktree_path: &Path, force: bool) 
 }
 
 pub fn git_status_summary(repo_path: &Path) -> Result<GitStatusSummary> {
-    let output = Command::new("git")
+    ensure_checkout_config_is_not_bare(repo_path)?;
+
+    let output = git_command(repo_path)
         .args(["status", "--porcelain"])
-        .current_dir(repo_path)
         .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "git status failed for '{}': {}",
+            repo_path.display(),
+            stderr.trim()
+        );
+    }
 
     let mut modified_files = Vec::new();
     let mut untracked_count = 0;
@@ -183,9 +253,8 @@ pub fn git_status_summary(repo_path: &Path) -> Result<GitStatusSummary> {
 }
 
 pub fn git_ahead_behind(repo_path: &Path) -> Result<(u32, u32)> {
-    let output = Command::new("git")
+    let output = git_command(repo_path)
         .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
-        .current_dir(repo_path)
         .stderr(Stdio::null())
         .output()?;
 
@@ -210,9 +279,8 @@ pub fn git_diff_stat(
     base_ref: &str,
 ) -> Result<(usize, usize, usize, Vec<String>)> {
     // Try three-dot diff first (changes since divergence)
-    let numstat_output = Command::new("git")
+    let numstat_output = git_command(worktree_path)
         .args(["diff", "--numstat", &format!("{base_ref}...HEAD")])
-        .current_dir(worktree_path)
         .stderr(Stdio::null())
         .output()?;
 
@@ -220,9 +288,8 @@ pub fn git_diff_stat(
         String::from_utf8_lossy(&numstat_output.stdout).to_string()
     } else {
         // Fallback to two-dot diff
-        let fallback = Command::new("git")
+        let fallback = git_command(worktree_path)
             .args(["diff", "--numstat", &format!("{base_ref}..HEAD")])
-            .current_dir(worktree_path)
             .stderr(Stdio::null())
             .output()?;
         if fallback.status.success() {
@@ -303,9 +370,8 @@ pub fn remove_worktree_repos(
 
 /// Fetch a branch from origin if not locally available.
 pub fn git_fetch_branch(repo_path: &Path, branch: &str) -> Result<()> {
-    let output = Command::new("git")
+    let output = git_command(repo_path)
         .args(["fetch", "origin", branch])
-        .current_dir(repo_path)
         .stderr(Stdio::piped())
         .output()?;
 
@@ -319,25 +385,23 @@ pub fn git_fetch_branch(repo_path: &Path, branch: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     /// Create a minimal git repo in a tempdir and return the tempdir handle.
     fn init_git_repo() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        Command::new("git")
+        git_command(tmp.path())
             .args(["init"])
-            .current_dir(tmp.path())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .unwrap();
-        Command::new("git")
+        git_command(tmp.path())
             .args(["config", "user.email", "test@test.com"])
-            .current_dir(tmp.path())
             .status()
             .unwrap();
-        Command::new("git")
+        git_command(tmp.path())
             .args(["config", "user.name", "Test"])
-            .current_dir(tmp.path())
             .status()
             .unwrap();
         tmp
@@ -346,14 +410,12 @@ mod tests {
     /// Create an initial commit so HEAD exists.
     fn make_initial_commit(repo: &std::path::Path) {
         std::fs::write(repo.join("README.md"), "init\n").unwrap();
-        Command::new("git")
+        git_command(repo)
             .args(["add", "README.md"])
-            .current_dir(repo)
             .status()
             .unwrap();
-        Command::new("git")
+        git_command(repo)
             .args(["commit", "-m", "initial"])
-            .current_dir(repo)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -361,6 +423,109 @@ mod tests {
     }
 
     // ── git_status_summary ──────────────────────────────────
+
+    #[test]
+    fn git_local_env_vars_cover_git_reported_variables() {
+        let output = Command::new("git")
+            .args(["rev-parse", "--local-env-vars"])
+            .output()
+            .expect("git rev-parse should run");
+        assert!(
+            output.status.success(),
+            "git rev-parse --local-env-vars failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let reported: BTreeSet<_> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect();
+        let configured: BTreeSet<_> = GIT_LOCAL_ENV_VARS
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect();
+
+        for name in &reported {
+            assert!(
+                configured.contains(name),
+                "GIT_LOCAL_ENV_VARS is missing git-reported local env var {name}"
+            );
+        }
+
+        let allowed_extra: BTreeSet<_> = ["GIT_INTERNAL_SUPER_PREFIX".to_string()]
+            .into_iter()
+            .collect();
+        for name in configured.difference(&reported) {
+            assert!(
+                allowed_extra.contains(name),
+                "GIT_LOCAL_ENV_VARS contains unexpected non-local env var {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn clear_git_local_env_removes_configured_variables() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "env"]);
+        for key in GIT_LOCAL_ENV_VARS {
+            command.env(key, "hostile");
+        }
+
+        clear_git_local_env(&mut command);
+        let output = command.output().expect("environment probe should run");
+        assert!(output.status.success());
+
+        let environment = String::from_utf8(output.stdout).expect("environment should be UTF-8");
+        for key in GIT_LOCAL_ENV_VARS {
+            assert!(
+                !environment
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{key}="))),
+                "{key} leaked into the subprocess environment"
+            );
+        }
+    }
+
+    #[test]
+    fn checkout_config_reports_core_bare_corruption_with_scoped_repair() {
+        let tmp = init_git_repo();
+        let status = git_command(tmp.path())
+            .args(["config", "--local", "core.bare", "true"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let error = match git_status_summary(tmp.path()) {
+            Ok(_) => panic!("corrupt checked-out repository should be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("core.bare=true"));
+        assert!(error.contains(&format!(
+            "git -C '{}' config --local core.bare false",
+            tmp.path().display()
+        )));
+    }
+
+    #[test]
+    fn repair_command_shell_quotes_repository_path() {
+        assert_eq!(
+            shell_quote_path(Path::new("/tmp/operator's repo")),
+            "'/tmp/operator'\"'\"'s repo'"
+        );
+    }
+
+    #[test]
+    fn checkout_config_guard_allows_legitimate_bare_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status = git_command(tmp.path())
+            .args(["init", "--bare", "--quiet"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        ensure_checkout_config_is_not_bare(tmp.path()).unwrap();
+    }
 
     #[test]
     fn status_summary_clean_repo() {
@@ -406,9 +571,8 @@ mod tests {
         make_initial_commit(tmp.path());
 
         std::fs::write(tmp.path().join("README.md"), "staged\n").unwrap();
-        Command::new("git")
+        git_command(tmp.path())
             .args(["add", "README.md"])
-            .current_dir(tmp.path())
             .status()
             .unwrap();
 
