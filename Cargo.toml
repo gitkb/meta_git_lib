@@ -12,7 +12,7 @@ meta_cli = { path = "../meta_cli", package = "meta" }
 loop_lib = { path = "../loop_lib" }
 anyhow = "1"
 indicatif = "0.17"
-console = "0.15"
+console = "0.16"
 dirs = "5.0"
 chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
