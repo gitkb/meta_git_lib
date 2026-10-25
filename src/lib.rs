@@ -1,5 +1,6 @@
 use anyhow::Result;
 use indicatif::ProgressBar;
+use meta_core::display::escape_path;
 use std::path::Path;
 use std::process::{Command, Stdio};
 pub mod clone_queue;
@@ -23,17 +24,17 @@ pub fn clone_repo_with_progress(
         if let Some(pb) = pb {
             pb.finish_with_message(format!(
                 "{}: already exists, skipping",
-                target_dir.display()
+                escape_path(target_dir)
             ));
         } else {
-            println!("{}: already exists, skipping", target_dir.display());
+            println!("{}: already exists, skipping", escape_path(target_dir));
         }
         return Ok(());
     }
     if let Some(pb) = pb {
         pb.set_message(format!("Cloning {url}"));
     } else {
-        println!("Cloning {} into {}", url, target_dir.display());
+        println!("Cloning {} into {}", url, escape_path(target_dir));
     }
     let mut child = Command::new("git")
         .arg("clone")
@@ -45,22 +46,22 @@ pub fn clone_repo_with_progress(
     let status = child.wait()?;
     if let Some(pb) = pb {
         if status.success() {
-            pb.finish_with_message(format!("{} ✓", style(target_dir.display()).green()));
+            pb.finish_with_message(format!("{} ✓", style(escape_path(target_dir)).green()));
         } else {
             pb.finish_with_message(format!(
                 "Failed to clone {} into {}",
                 url,
-                target_dir.display()
+                escape_path(target_dir)
             ));
         }
     } else if status.success() {
-        println!("{} ✓", style(target_dir.display()).green());
+        println!("{} ✓", style(escape_path(target_dir)).green());
     } else {
-        println!("Failed to clone {} into {}", url, target_dir.display());
+        println!("Failed to clone {} into {}", url, escape_path(target_dir));
     }
     if status.success() {
         Ok(())
     } else {
-        anyhow::bail!("Failed to clone {} into {}", url, target_dir.display())
+        anyhow::bail!("Failed to clone {} into {}", url, escape_path(target_dir))
     }
 }

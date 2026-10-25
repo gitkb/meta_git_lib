@@ -1,6 +1,7 @@
 //! Utility functions for worktree management.
 
 use anyhow::{Context, Result};
+use meta_core::display::escape_path;
 use std::path::{Path, PathBuf};
 
 use super::types::WorktreeContext;
@@ -31,11 +32,35 @@ pub fn resolve_worktree_root(meta_dir: Option<&Path>) -> Result<PathBuf> {
     }
     // 2. Check worktrees_dir in .meta config
     if let Some(dir) = meta_dir {
-        if let Some(configured) = read_worktrees_dir_from_config(dir) {
-            return Ok(dir.join(configured));
+        // The config's rules for the worktree directory (inside the
+        // workspace, not inside a project, not into .git) hold here too,
+        // whoever ran this plugin
+        if let Some((config, _)) = meta_core::config::find_meta_config_in(dir) {
+            meta_core::config::parse_meta_config(&config)?;
         }
-        // 3. Default: .worktrees/ relative to meta root
-        return Ok(dir.join(".worktrees"));
+        if let Some(configured) = read_worktrees_dir_from_config(dir) {
+            // Worktrees are created and removed there, so a committed config
+            // may not point it outside the workspace
+            let relative = meta_core::config::relative_dir(dir, &configured).map_err(|why| {
+                anyhow::anyhow!(
+                    "Invalid worktrees_dir in the .meta of {}: {why} (use META_WORKTREES \
+                     for a directory elsewhere)",
+                    escape_path(dir)
+                )
+            })?;
+            return Ok(dir.join(relative));
+        }
+        // 3. Default: .worktrees/ relative to meta root, held to the same
+        // rules: a committed symlink there must not send worktrees (and their
+        // removal) outside the workspace or into .git
+        let root = dir.join(".worktrees");
+        meta_core::config::relative_dir(dir, ".worktrees").map_err(|why| {
+            anyhow::anyhow!(
+                "Refusing to keep worktrees in {}: {why}",
+                escape_path(&root)
+            )
+        })?;
+        return Ok(root);
     }
     // Fallback if no meta dir found
     let cwd = std::env::current_dir()?;
@@ -87,12 +112,40 @@ pub fn require_meta_dir() -> Result<PathBuf> {
     find_meta_dir().ok_or_else(|| anyhow::anyhow!("Not inside a meta project (no .meta found)"))
 }
 
+/// The directory of the worktree set `name` under `worktree_root`. A symlink
+/// there (say one tracked in a repo that holds `worktrees_dir`) must not
+/// lead commands, or a removal, outside the worktree root.
+pub fn worktree_set_dir(worktree_root: &Path, name: &str) -> Result<PathBuf> {
+    let wt_dir = worktree_root.join(name);
+    // meta makes set directories itself; one that is a link (even to another
+    // set) is someone else's doing
+    if wt_dir
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        anyhow::bail!(
+            "Refusing to use worktree '{}': {} is a symlink",
+            meta_core::display::escape(name),
+            escape_path(&wt_dir)
+        );
+    }
+    if worktree_root.exists() {
+        meta_core::config::resolve_inside(worktree_root, name).map_err(|why| {
+            anyhow::anyhow!(
+                "Refusing to use worktree '{}': {why}",
+                meta_core::display::escape(name)
+            )
+        })?;
+    }
+    Ok(worktree_root.join(name))
+}
+
 /// Resolve worktree context for a named worktree.
 /// Returns meta_dir (for hooks), worktree_root, and the specific worktree directory.
 pub fn resolve_worktree_context(name: &str) -> Result<WorktreeContext> {
     let meta_dir = find_meta_dir();
     let worktree_root = resolve_worktree_root(meta_dir.as_deref())?;
-    let wt_dir = worktree_root.join(name);
+    let wt_dir = worktree_set_dir(&worktree_root, name)?;
     Ok(WorktreeContext {
         meta_dir,
         worktree_root,
@@ -104,7 +157,11 @@ pub fn resolve_worktree_context(name: &str) -> Result<WorktreeContext> {
 pub fn resolve_existing_worktree(name: &str) -> Result<WorktreeContext> {
     let ctx = resolve_worktree_context(name)?;
     if !ctx.wt_dir.exists() {
-        anyhow::bail!("Worktree '{}' not found at {}", name, ctx.wt_dir.display());
+        anyhow::bail!(
+            "Worktree '{}' not found at {}",
+            name,
+            escape_path(&ctx.wt_dir)
+        );
     }
     Ok(ctx)
 }
@@ -126,7 +183,7 @@ pub fn discover_and_validate_worktree(
 /// Load and parse the .meta config, returning the project list.
 pub fn load_projects(meta_dir: &Path) -> Result<Vec<meta_core::config::ProjectInfo>> {
     let (config_path, _) = meta_core::config::find_meta_config(meta_dir, None)
-        .ok_or_else(|| anyhow::anyhow!("No .meta config found in {}", meta_dir.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("No .meta config found in {}", escape_path(meta_dir)))?;
     let (projects, _) = meta_core::config::parse_meta_config(&config_path)?;
     Ok(projects)
 }

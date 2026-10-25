@@ -1,5 +1,6 @@
 use log::{debug, warn};
 use meta_core::config;
+use meta_core::display::escape_path;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -95,7 +96,7 @@ impl CloneQueue {
         }
 
         let Some((meta_path, _format)) = config::find_meta_config_in(base_dir) else {
-            debug!("No .meta config found in {}", base_dir.display());
+            debug!("No .meta config found in {}", escape_path(base_dir));
             return Ok(0);
         };
 
@@ -103,7 +104,7 @@ impl CloneQueue {
         debug!(
             "Discovered {} projects in {} at depth {}",
             projects.len(),
-            base_dir.display(),
+            escape_path(base_dir),
             depth_level
         );
 
