@@ -232,7 +232,8 @@ pub fn resolve_branch(
 }
 
 /// Parse a human-friendly duration string to seconds.
-/// Supported formats: "30s", "5m", "1h", "2d", "1w", or bare seconds "300"
+/// Supported formats: "30s", "5m", "1h", "2d", "1w", or bare seconds "300".
+/// The result always fits in an `i64`, so timestamp arithmetic can't wrap.
 pub fn parse_duration(s: &str) -> Result<u64> {
     let s = s.trim();
     if s.is_empty() {
@@ -240,29 +241,30 @@ pub fn parse_duration(s: &str) -> Result<u64> {
     }
 
     // Bare number: treat as seconds
-    if s.chars().all(|c| c.is_ascii_digit()) {
-        return s
-            .parse::<u64>()
-            .with_context(|| format!("Invalid duration: '{s}'"));
-    }
-
-    let (num_str, suffix) = s.split_at(s.len() - 1);
+    let (num_str, multiplier) = if s.chars().all(|c| c.is_ascii_digit()) {
+        (s, 1)
+    } else {
+        let suffix_at = s.len() - s.chars().last().map_or(0, char::len_utf8);
+        let (num_str, suffix) = s.split_at(suffix_at);
+        let multiplier = match suffix {
+            "s" => 1,
+            "m" => 60,
+            "h" => 3600,
+            "d" => 86400,
+            "w" => 604800,
+            _ => anyhow::bail!(
+                "Invalid duration suffix '{suffix}'. Use s (seconds), m (minutes), h (hours), d (days), or w (weeks)"
+            ),
+        };
+        (num_str, multiplier)
+    };
     let num: u64 = num_str
         .parse()
         .with_context(|| format!("Invalid duration number: '{num_str}'"))?;
 
-    let multiplier = match suffix {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86400,
-        "w" => 604800,
-        _ => anyhow::bail!(
-            "Invalid duration suffix '{suffix}'. Use s (seconds), m (minutes), h (hours), d (days), or w (weeks)"
-        ),
-    };
-
-    Ok(num * multiplier)
+    num.checked_mul(multiplier)
+        .filter(|secs| i64::try_from(*secs).is_ok())
+        .ok_or_else(|| anyhow::anyhow!("Duration '{s}' is too large"))
 }
 
 /// Format seconds into a human-friendly duration string.
@@ -341,7 +343,7 @@ pub fn resolve_from_pr(from_pr: &str) -> Result<(String, u32, String)> {
     Ok((repo_spec.to_string(), pr_num, branch))
 }
 
-/// Check if a repo's remote URL matches the given owner/repo spec.
+/// Check if a repo's `origin` remote is exactly the given owner/repo.
 pub fn repo_matches_spec(repo_path: &Path, spec: &str) -> bool {
     use std::process::Command;
 
@@ -351,13 +353,21 @@ pub fn repo_matches_spec(repo_path: &Path, spec: &str) -> bool {
         .output();
 
     match output {
-        Ok(o) if o.status.success() => {
-            let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            // Match against github.com:owner/repo or github.com/owner/repo
-            url.contains(spec) || url.contains(&spec.replace('/', ":"))
-        }
+        Ok(o) if o.status.success() => remote_owner_repo(&String::from_utf8_lossy(&o.stdout))
+            .is_some_and(|owner_repo| owner_repo.eq_ignore_ascii_case(spec)),
         _ => false,
     }
+}
+
+/// The trailing `owner/repo` of a remote URL such as `git@github.com:owner/repo.git`,
+/// `https://github.com/owner/repo`, `ssh://git@host/owner/repo.git` or a local path.
+fn remote_owner_repo(url: &str) -> Option<String> {
+    let path = url.trim().trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut parts = path.rsplit(['/', ':', '\\']);
+    let repo = parts.next().filter(|p| !p.is_empty())?;
+    let owner = parts.next().filter(|p| !p.is_empty())?;
+    Some(format!("{owner}/{repo}"))
 }
 
 pub fn ensure_worktrees_in_gitignore(
@@ -495,6 +505,65 @@ mod tests {
     #[test]
     fn parse_duration_rejects_non_numeric() {
         assert!(parse_duration("abcs").is_err());
+        assert!(parse_duration("5é").is_err());
+    }
+
+    #[test]
+    fn parse_duration_rejects_values_that_overflow() {
+        for input in [
+            "18446744073709551615",
+            "30500000000000w",
+            "9223372036854775808",
+        ] {
+            let err = parse_duration(input).unwrap_err();
+            assert!(err.to_string().contains("too large"), "{input}: {err}");
+        }
+        assert_eq!(
+            parse_duration("9223372036854775807").unwrap(),
+            i64::MAX as u64
+        );
+    }
+
+    // ── remote_owner_repo ───────────────────────────────────
+
+    #[test]
+    fn remote_owner_repo_parses_common_url_forms() {
+        for url in [
+            "git@github.com:org/api.git",
+            "https://github.com/org/api",
+            "https://github.com/org/api.git/\n",
+            "ssh://git@github.example.com:22/org/api.git",
+            "C:\\remotes\\org\\api.git",
+        ] {
+            assert_eq!(remote_owner_repo(url).as_deref(), Some("org/api"), "{url}");
+        }
+        assert_eq!(
+            remote_owner_repo("git@github.com:org/api-legacy.git").as_deref(),
+            Some("org/api-legacy")
+        );
+        assert_eq!(remote_owner_repo("api"), None);
+    }
+
+    #[test]
+    fn repo_matches_spec_requires_the_exact_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(tmp.path())
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-q"]);
+        run(&[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:Org/api-legacy.git",
+        ]);
+        assert!(!repo_matches_spec(tmp.path(), "org/api"));
+        assert!(!repo_matches_spec(tmp.path(), "api-legacy"));
+        assert!(repo_matches_spec(tmp.path(), "org/api-legacy"));
     }
 
     // ── format_duration ─────────────────────────────────────

@@ -55,22 +55,32 @@ pub fn store_add(worktree_path: &Path, entry: WorktreeStoreEntry) -> Result<()> 
     })
 }
 
-/// Remove a worktree entry from the centralized store.
-pub fn store_remove(worktree_path: &Path) -> Result<()> {
-    let (data_path, lock_path) = store_paths();
-    if !data_path.exists() {
-        return Ok(());
-    }
-    let key = store_key(worktree_path);
-
-    meta_core::store::update::<WorktreeStoreData, _>(&data_path, &lock_path, |store| {
-        store.worktrees.remove(&key);
-    })
-}
-
 /// Get all entries from the store.
 pub fn store_list() -> Result<WorktreeStoreData> {
     meta_core::store::read(&store_path())
+}
+
+/// Get the store key and entry for an existing worktree path, if meta
+/// recorded creating it. Keep the key: once the path is deleted it can no
+/// longer be resolved to the same key.
+pub fn store_get(worktree_path: &Path) -> Result<Option<(String, WorktreeStoreEntry)>> {
+    let key = store_key(worktree_path);
+    Ok(store_list()?
+        .worktrees
+        .remove(&key)
+        .map(|entry| (key, entry)))
+}
+
+/// Recorded worktree sets inside `worktree_path`, not counting itself.
+/// Deleting `worktree_path` would delete those sets too.
+pub fn store_sets_inside(worktree_path: &Path) -> Result<Vec<String>> {
+    let key = store_key(worktree_path);
+    let root = Path::new(&key);
+    Ok(store_list()?
+        .worktrees
+        .into_keys()
+        .filter(|k| Path::new(k) != root && Path::new(k).starts_with(root))
+        .collect())
 }
 
 /// Add repos to an existing worktree entry in the store.
@@ -86,15 +96,23 @@ pub fn store_extend_repos(worktree_path: &Path, repos: Vec<StoreRepoEntry>) -> R
 }
 
 /// Remove multiple worktree entries from the store in a single lock cycle.
-pub fn store_remove_batch(keys: &[String]) -> Result<()> {
+/// Each `(key, created_at)` pair removes the entry only if it is still the
+/// one that was read, so a worktree recreated at the same path keeps its record.
+pub fn store_remove_batch(entries: &[(String, String)]) -> Result<()> {
     let (data_path, lock_path) = store_paths();
     if !data_path.exists() {
         return Ok(());
     }
 
     meta_core::store::update::<WorktreeStoreData, _>(&data_path, &lock_path, |store| {
-        for key in keys {
-            store.worktrees.remove(key);
+        for (key, created_at) in entries {
+            if store
+                .worktrees
+                .get(key)
+                .is_some_and(|e| e.created_at == *created_at)
+            {
+                store.worktrees.remove(key);
+            }
         }
     })
 }
@@ -116,7 +134,8 @@ pub fn entry_ttl_remaining(entry: &WorktreeStoreEntry, now_epoch: i64) -> Option
                 return i64::MAX;
             }
         };
-        created + ttl as i64 - now_epoch
+        let ttl = i64::try_from(ttl).unwrap_or(i64::MAX);
+        created.saturating_add(ttl).saturating_sub(now_epoch)
     })
 }
 
@@ -251,6 +270,13 @@ mod tests {
     }
 
     #[test]
+    fn ttl_remaining_huge_ttl_never_expires() {
+        let entry = make_entry("2025-01-01T00:00:00Z", Some(u64::MAX));
+        let remaining = entry_ttl_remaining(&entry, 1_800_000_000).unwrap();
+        assert_eq!(remaining, i64::MAX - 1_800_000_000);
+    }
+
+    #[test]
     fn ttl_remaining_malformed_date_returns_max() {
         let entry = make_entry("not-a-date", Some(3600));
         let remaining = entry_ttl_remaining(&entry, 1_700_000_000).unwrap();
@@ -283,7 +309,7 @@ mod tests {
         assert!(data.worktrees.contains_key(&key));
 
         // Remove entry
-        store_remove(&wt_path).unwrap();
+        store_remove_batch(&[(key.clone(), "2025-01-01T00:00:00Z".to_string())]).unwrap();
 
         // Verify it was removed
         let data = store_list().unwrap();
@@ -315,8 +341,15 @@ mod tests {
         store_add(&wt3, make_entry("2025-01-01T00:00:00Z", None)).unwrap();
 
         // Remove two in batch
-        let keys_to_remove = vec![store_key(&wt1), store_key(&wt2)];
+        let keys_to_remove = vec![
+            (store_key(&wt1), "2025-01-01T00:00:00Z".to_string()),
+            (store_key(&wt2), "2025-01-01T00:00:00Z".to_string()),
+        ];
         store_remove_batch(&keys_to_remove).unwrap();
+
+        // An entry recreated since it was read keeps its record
+        store_add(&wt3, make_entry("2026-01-01T00:00:00Z", None)).unwrap();
+        store_remove_batch(&[(store_key(&wt3), "2025-01-01T00:00:00Z".to_string())]).unwrap();
 
         // Verify only wt3 remains
         let data = store_list().unwrap();
@@ -325,7 +358,7 @@ mod tests {
         assert!(data.worktrees.contains_key(&store_key(&wt3)));
 
         // Cleanup
-        store_remove(&wt3).unwrap();
+        store_remove_batch(&[(store_key(&wt3), "2026-01-01T00:00:00Z".to_string())]).unwrap();
         std::env::remove_var("META_DATA_DIR");
     }
 
@@ -370,7 +403,7 @@ mod tests {
         assert!(stored_entry.repos.iter().any(|r| r.alias == "repo2"));
 
         // Cleanup
-        store_remove(&wt_path).unwrap();
+        store_remove_batch(&[(store_key(&wt_path), "2025-01-01T00:00:00Z".to_string())]).unwrap();
         std::env::remove_var("META_DATA_DIR");
     }
 
@@ -389,7 +422,10 @@ mod tests {
 
         // Remove on non-existent worktree should succeed
         let wt_path = temp_dir.path().join("nonexistent-wt");
-        assert!(store_remove(&wt_path).is_ok());
+        assert!(
+            store_remove_batch(&[(store_key(&wt_path), "2025-01-01T00:00:00Z".to_string())])
+                .is_ok()
+        );
 
         std::env::remove_var("META_DATA_DIR");
     }
@@ -436,7 +472,11 @@ mod tests {
 
         // Cleanup - batch remove for efficiency
         let keys: Vec<String> = paths.iter().map(|p| store_key(p)).collect();
-        store_remove_batch(&keys).unwrap();
+        let entries: Vec<_> = keys
+            .iter()
+            .map(|k| (k.clone(), "2025-01-01T00:00:00Z".to_string()))
+            .collect();
+        store_remove_batch(&entries).unwrap();
 
         // Verify cleanup worked
         let data_after = store_list().unwrap();
@@ -485,7 +525,11 @@ mod tests {
                     let end = std::cmp::min(start + 4, paths.len());
                     let keys: Vec<String> =
                         paths[start..end].iter().map(|p| store_key(p)).collect();
-                    store_remove_batch(&keys).unwrap();
+                    let entries: Vec<_> = keys
+                        .into_iter()
+                        .map(|k| (k, "2025-01-01T00:00:00Z".to_string()))
+                        .collect();
+                    store_remove_batch(&entries).unwrap();
                 })
             })
             .collect();
