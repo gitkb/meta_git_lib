@@ -6,6 +6,7 @@
 pub mod git_ops;
 pub mod helpers;
 pub mod hooks;
+pub mod safety;
 pub mod store;
 pub mod types;
 

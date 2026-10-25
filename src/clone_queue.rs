@@ -20,17 +20,25 @@ pub struct CloneTask {
     pub is_meta: bool,
 }
 
+/// A clone that failed, with git's own error output.
+#[derive(Debug, Clone)]
+pub struct CloneFailure {
+    pub name: String,
+    pub url: String,
+    pub error: String,
+}
+
 /// Thread-safe queue for managing clone tasks with dynamic discovery
 pub struct CloneQueue {
     /// Pending tasks to process
     pending: Mutex<Vec<CloneTask>>,
     /// Completed task paths (to avoid duplicates)
     completed: Mutex<HashSet<PathBuf>>,
-    /// Failed task paths
-    failed: Mutex<HashSet<PathBuf>>,
+    /// Failed clones, in the order they failed
+    failures: Mutex<Vec<CloneFailure>>,
     /// Total tasks discovered (for progress display)
     total_discovered: AtomicUsize,
-    /// Total tasks completed
+    /// Total tasks finished, failed ones included (for progress display)
     total_completed: AtomicUsize,
     /// Git depth argument (if any)
     git_depth: Option<String>,
@@ -43,7 +51,7 @@ impl CloneQueue {
         Self {
             pending: Mutex::new(Vec::new()),
             completed: Mutex::new(HashSet::new()),
-            failed: Mutex::new(HashSet::new()),
+            failures: Mutex::new(Vec::new()),
             total_discovered: AtomicUsize::new(0),
             total_completed: AtomicUsize::new(0),
             git_depth,
@@ -216,12 +224,24 @@ impl CloneQueue {
         pending.iter().map(|t| t.url.clone()).collect()
     }
 
-    /// Mark a task as failed
-    pub fn mark_failed(&self, task: &CloneTask) {
+    /// Mark a task as failed, keeping git's error output for the final report
+    pub fn mark_failed(&self, task: &CloneTask, error: String) {
         self.total_completed.fetch_add(1, Ordering::SeqCst);
 
-        let mut failed = self.failed.lock().unwrap_or_else(|e| e.into_inner());
-        failed.insert(task.target_path.clone());
+        let mut failures = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+        failures.push(CloneFailure {
+            name: task.name.clone(),
+            url: task.url.clone(),
+            error,
+        });
+    }
+
+    /// Clones that failed so far
+    pub fn failures(&self) -> Vec<CloneFailure> {
+        self.failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -490,6 +510,22 @@ mod tests {
         let (completed, discovered) = queue.get_counts();
         assert_eq!(discovered, 2);
         assert_eq!(completed, 0);
+    }
+
+    #[test]
+    fn failed_clones_are_reported_with_their_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = CloneQueue::new(None, None);
+        let task = make_task("missing", &dir.path().join("missing"));
+        queue.push(task.clone());
+
+        queue.mark_failed(&task, "fatal: repository not found".to_string());
+
+        let failures = queue.failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].name, "missing");
+        assert_eq!(failures[0].url, task.url);
+        assert_eq!(failures[0].error, "fatal: repository not found");
     }
 
     // ── drain_all ─────────────────────────────────────────────

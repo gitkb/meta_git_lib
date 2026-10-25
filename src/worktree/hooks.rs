@@ -11,6 +11,8 @@ use super::types::{CreateRepoEntry, PruneEntry};
 ///
 /// Reads the `.meta` config for `worktree.hooks.<hook_name>`.
 /// If configured, spawns the command and pipes `payload` JSON to stdin.
+/// The hook's stderr goes to meta's stderr, as git does for its hooks; a
+/// pipe that nobody reads would block a verbose hook forever.
 /// Hook failure prints a warning but doesn't block the operation.
 pub fn fire_worktree_hook(hook_name: &str, payload: &serde_json::Value, meta_dir: Option<&Path>) {
     let dir = match meta_dir {
@@ -43,7 +45,7 @@ pub fn fire_worktree_hook(hook_name: &str, payload: &serde_json::Value, meta_dir
         .args(["-c", cmd_str])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
         .and_then(|mut child| {
             // Write payload then drop stdin to signal EOF before waiting

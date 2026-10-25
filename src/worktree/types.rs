@@ -200,6 +200,8 @@ pub struct DiffTotals {
 #[derive(Debug, Serialize)]
 pub struct PruneOutput {
     pub removed: Vec<PruneEntry>,
+    /// Candidates kept because deleting them would lose work.
+    pub kept: Vec<PruneEntry>,
     pub dry_run: bool,
 }
 
