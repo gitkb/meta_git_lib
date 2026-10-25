@@ -4,7 +4,6 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 pub mod clone_queue;
 pub mod missing;
-pub mod snapshot;
 pub mod ssh_multiplexing;
 pub mod worktree;
 use console::style;
