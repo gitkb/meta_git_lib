@@ -35,7 +35,7 @@ pub fn resolve_worktree_root(meta_dir: Option<&Path>) -> Result<PathBuf> {
         // The config's rules for the worktree directory (inside the
         // workspace, not inside a project, not into .git) hold here too,
         // whoever ran this plugin
-        if let Some((config, _)) = meta_core::config::find_meta_config_in(dir) {
+        if let Some((config, _)) = meta_core::config::find_meta_config_in(dir)? {
             meta_core::config::parse_meta_config(&config)?;
         }
         if let Some(configured) = read_worktrees_dir_from_config(dir) {
