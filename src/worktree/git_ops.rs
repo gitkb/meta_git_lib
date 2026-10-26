@@ -1,6 +1,7 @@
 //! Git operations for worktree management.
 
 use anyhow::Result;
+use meta_core::display::{escape, escape_path};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -58,15 +59,15 @@ fn ensure_checkout_config_is_not_bare(repo_path: &Path) -> Result<()> {
             anyhow::bail!(
                 "Repository '{}' is a checked-out work tree but its shared Git config has \
                  core.bare=true.\nRepair it with:\n  git -C {} config --local core.bare false",
-                repo_path.display(),
-                shell_quote_path(repo_path)
+                escape_path(repo_path),
+                escape(&shell_quote_path(repo_path))
             );
         }
     } else if output.status.code() != Some(1) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
             "Failed to inspect core.bare for '{}': {}",
-            repo_path.display(),
+            escape_path(repo_path),
             stderr.trim()
         );
     }
@@ -90,7 +91,7 @@ pub fn git_worktree_add(
                 anyhow::anyhow!(
                     "Ref '{}' not found in repo '{}'",
                     ref_name,
-                    repo_path.display()
+                    escape_path(repo_path)
                 )
             })?;
         // Pass the name, not the commit: a remote-tracking ref still sets the
@@ -104,7 +105,7 @@ pub fn git_worktree_add(
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!(
                 "git worktree add failed for '{}' (branch: {}, ref: {}): {}",
-                repo_path.display(),
+                escape_path(repo_path),
                 branch,
                 ref_name,
                 stderr.trim()
@@ -139,7 +140,7 @@ pub fn git_worktree_add(
     } else {
         // Create new branch from HEAD
         let start = git_rev_parse(repo_path, "HEAD")?.ok_or_else(|| {
-            anyhow::anyhow!("{} has no commit to branch from", repo_path.display())
+            anyhow::anyhow!("{} has no commit to branch from", escape_path(repo_path))
         })?;
         (
             vec!["worktree", "add", "-b", branch, &dest_str],
@@ -153,7 +154,7 @@ pub fn git_worktree_add(
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
             "git worktree add failed for '{}' (branch: {}): {}",
-            repo_path.display(),
+            escape_path(repo_path),
             branch,
             stderr.trim()
         );
@@ -192,7 +193,7 @@ pub fn git_status_summary(repo_path: &Path) -> Result<GitStatusSummary> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
             "git status failed for '{}': {}",
-            repo_path.display(),
+            escape_path(repo_path),
             stderr.trim()
         );
     }
@@ -311,10 +312,10 @@ pub fn remove_worktree_repos(
 
     for m in ordered {
         if verbose {
-            eprintln!("Removing worktree at {}", m.path.display());
+            eprintln!("Removing worktree at {}", escape_path(&m.path));
         }
         git_worktree_remove(&m.repo_git_dir, &m.path, force)
-            .map_err(|e| e.context(format!("Cannot remove {}", m.path.display())))?;
+            .map_err(|e| e.context(format!("Cannot remove {}", escape_path(&m.path))))?;
     }
     Ok(())
 }
@@ -337,7 +338,7 @@ pub fn git_rev_parse(repo_path: &Path, rev: &str) -> Result<Option<String>> {
     }
     anyhow::bail!(
         "git rev-parse {rev} failed in {}: {}",
-        repo_path.display(),
+        escape_path(repo_path),
         stderr.trim()
     )
 }
@@ -373,7 +374,7 @@ pub fn git_branch_is_free(repo_path: &Path, branch: &str) -> Result<()> {
     anyhow::ensure!(
         list.status.success(),
         "Cannot list the worktrees of {}: {}",
-        repo_path.display(),
+        escape_path(repo_path),
         String::from_utf8_lossy(&list.stderr).trim()
     );
     let wanted = format!("branch {full}");
@@ -390,7 +391,7 @@ pub fn git_branch_is_free(repo_path: &Path, branch: &str) -> Result<()> {
     anyhow::ensure!(
         output.status.success(),
         "Cannot find the git directory of {}: {}",
-        repo_path.display(),
+        escape_path(repo_path),
         String::from_utf8_lossy(&output.stderr).trim()
     );
     // Relative output is relative to the repository, where git ran.
@@ -399,8 +400,8 @@ pub fn git_branch_is_free(repo_path: &Path, branch: &str) -> Result<()> {
     anyhow::ensure!(
         common.is_dir(),
         "Cannot find the git directory of {} (got {})",
-        repo_path.display(),
-        common.display()
+        escape_path(repo_path),
+        escape_path(&common)
     );
     let mut admin_dirs = vec![common.clone()];
     match std::fs::read_dir(common.join("worktrees")) {
@@ -418,7 +419,7 @@ pub fn git_branch_is_free(repo_path: &Path, branch: &str) -> Result<()> {
             Ok(text) => Ok(text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
             Err(e) => {
-                Err(anyhow::Error::from(e).context(format!("Cannot read {}", path.display())))
+                Err(anyhow::Error::from(e).context(format!("Cannot read {}", escape_path(&path))))
             }
         }
     };
@@ -433,14 +434,14 @@ pub fn git_branch_is_free(repo_path: &Path, branch: &str) -> Result<()> {
         {
             return Err(in_use(&format!(
                 "being rebased by the worktree whose git dir is {}",
-                dir.display()
+                escape_path(&dir)
             )));
         }
         let bisect = read(dir.join("BISECT_START"))?;
         if [branch, full.as_str()].contains(&bisect.trim()) {
             return Err(in_use(&format!(
                 "being bisected by the worktree whose git dir is {}",
-                dir.display()
+                escape_path(&dir)
             )));
         }
     }

@@ -1,5 +1,6 @@
 use log::{debug, warn};
 use meta_core::config;
+use meta_core::display::escape_path;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -94,8 +95,8 @@ impl CloneQueue {
             }
         }
 
-        let Some((meta_path, _format)) = config::find_meta_config_in(base_dir) else {
-            debug!("No .meta config found in {}", base_dir.display());
+        let Some((meta_path, _format)) = config::find_meta_config_in(base_dir)? else {
+            debug!("No .meta config found in {}", escape_path(base_dir));
             return Ok(0);
         };
 
@@ -103,7 +104,7 @@ impl CloneQueue {
         debug!(
             "Discovered {} projects in {} at depth {}",
             projects.len(),
-            base_dir.display(),
+            escape_path(base_dir),
             depth_level
         );
 
@@ -113,11 +114,9 @@ impl CloneQueue {
 
             // Skip if already exists
             if target_path.exists() {
-                // But still check if it has a config file for nested discovery
-                if config::find_meta_config_in(&target_path).is_some() {
-                    // Queue it for discovery even though it's already cloned
-                    added += self.push_from_meta(&target_path, depth_level + 1)?;
-                }
+                // But still look in it for nested discovery (push_from_meta
+                // checks the depth limit before it looks for a config)
+                added += self.push_from_meta(&target_path, depth_level + 1)?;
                 continue;
             }
 
@@ -260,6 +259,41 @@ mod tests {
     }
 
     // ── push / dedup ──────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn push_from_meta_does_not_look_past_the_depth_limit() {
+        // child exists with a dangling .meta; at depth limit 0 it is never
+        // read, so seeding still queues the missing sibling
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("child")).unwrap();
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{"projects": {"child": {"repo": "u", "meta": true}, "sib": "u2"}}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("missing.json", dir.path().join("child/.meta")).unwrap();
+        let queue = CloneQueue::new(None, Some(0));
+        assert_eq!(queue.push_from_meta(dir.path(), 0).unwrap(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn push_from_meta_fails_on_a_nested_config_it_cannot_read() {
+        // child/.meta is a link to nowhere: its repos are unknown, which is
+        // an error, not "no nested repos"
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("child")).unwrap();
+        std::fs::write(
+            dir.path().join(".meta"),
+            r#"{"projects": {"child": {"repo": "u", "meta": true}}}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("missing.json", dir.path().join("child/.meta")).unwrap();
+        let queue = CloneQueue::new(None, None);
+        let err = queue.push_from_meta(dir.path(), 0).unwrap_err();
+        assert!(format!("{err:#}").contains("Cannot read"), "{err:#}");
+    }
 
     #[test]
     fn push_adds_task_and_increments_count() {

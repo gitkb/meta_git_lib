@@ -4,6 +4,7 @@
 //! inspected, nested ones included, and so is anything outside a repository.
 
 use anyhow::{Context, Result};
+use meta_core::display::{escape, escape_path};
 use std::path::{Path, PathBuf};
 
 use super::git_ops::{git_command, remove_worktree_repos};
@@ -53,7 +54,7 @@ pub fn check_worktree_removal(wt_dir: &Path) -> Result<RemovalCheck> {
     if wt_dir.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
         check.blockers.push(format!(
             "{} is a symbolic link; meta doesn't delete through links",
-            wt_dir.display()
+            escape_path(wt_dir)
         ));
         return Ok(check);
     }
@@ -66,7 +67,9 @@ pub fn check_worktree_removal(wt_dir: &Path) -> Result<RemovalCheck> {
             true
         }
         GitEntry::Repository(why) => {
-            check.blockers.push(format!("{}: {why}", wt_dir.display()));
+            check
+                .blockers
+                .push(format!("{}: {why}", escape_path(wt_dir)));
             return Ok(check);
         }
         GitEntry::None => false,
@@ -139,13 +142,13 @@ pub fn delete_checked_set(
     if check_worktree_removal(wt_dir)? != *check {
         anyhow::bail!(
             "{} changed after it was checked; left in place, check it again",
-            wt_dir.display()
+            escape_path(wt_dir)
         );
     }
     remove_worktree_repos(&check.members, force, verbose)?;
     if force {
         for path in &check.loose {
-            remove_entry(path).with_context(|| format!("Cannot delete {}", path.display()))?;
+            remove_entry(path).with_context(|| format!("Cannot delete {}", escape_path(path)))?;
         }
     }
     remove_empty_dirs(wt_dir)?;
@@ -156,7 +159,7 @@ pub fn delete_checked_set(
         anyhow::bail!(
             "{} could not be deleted completely (left in place: {}); new files may have \
              appeared in it, or some couldn't be removed",
-            wt_dir.display(),
+            escape_path(wt_dir),
             sample(&left, |p| relative_label(wt_dir, p))
         );
     }
@@ -179,10 +182,10 @@ fn remove_empty_dirs(dir: &Path) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).with_context(|| format!("Cannot read {}", dir.display())),
+        Err(e) => return Err(e).with_context(|| format!("Cannot read {}", escape_path(dir))),
     };
     for entry in entries {
-        let entry = entry.with_context(|| format!("Cannot read {}", dir.display()))?;
+        let entry = entry.with_context(|| format!("Cannot read {}", escape_path(dir)))?;
         if entry.file_type().is_ok_and(|t| t.is_dir()) {
             remove_empty_dirs(&entry.path())?;
         }
@@ -220,7 +223,7 @@ fn git_entry(dir: &Path) -> Result<GitEntry> {
                 GitEntry::None
             })
         }
-        Err(e) => Err(e).with_context(|| format!("Cannot inspect {}", git.display())),
+        Err(e) => Err(e).with_context(|| format!("Cannot inspect {}", escape_path(&git))),
     }
 }
 
@@ -239,20 +242,20 @@ fn linked_worktree_git_dir(checkout: &Path) -> Result<PathBuf> {
     anyhow::ensure!(
         admin.exists(),
         "its git metadata {} is missing; was the repository moved or deleted?",
-        admin.display()
+        escape_path(&admin)
     );
     let common = std::fs::read_to_string(admin.join("commondir")).with_context(|| {
         if admin.components().any(|c| c.as_os_str() == "modules") {
             format!(
                 "{} looks like a submodule; meta can't remove sets that contain submodules",
-                admin.display()
+                escape_path(&admin)
             )
         } else {
-            format!("{} has no commondir", admin.display())
+            format!("{} has no commondir", escape_path(&admin))
         }
     })?;
     let backlink = std::fs::read_to_string(admin.join("gitdir"))
-        .with_context(|| format!("{} has no gitdir", admin.display()))?;
+        .with_context(|| format!("{} has no gitdir", escape_path(&admin)))?;
     let points_back = admin
         .join(backlink.trim())
         .canonicalize()
@@ -262,7 +265,7 @@ fn linked_worktree_git_dir(checkout: &Path) -> Result<PathBuf> {
         points_back,
         "{} belongs to another checkout (if this set was moved, run \
          'git worktree repair' in its repository)",
-        admin.display()
+        escape_path(&admin)
     );
     Ok(admin.join(common.trim()))
 }
@@ -271,16 +274,16 @@ fn linked_worktree_git_dir(checkout: &Path) -> Result<PathBuf> {
 /// `dir` accounts for its files.
 fn scan(dir: &Path, owned: bool, loose: &mut Vec<PathBuf>, check: &mut RemovalCheck) -> Result<()> {
     let entries =
-        std::fs::read_dir(dir).with_context(|| format!("Cannot read {}", dir.display()))?;
+        std::fs::read_dir(dir).with_context(|| format!("Cannot read {}", escape_path(dir)))?;
     for entry in entries {
-        let entry = entry.with_context(|| format!("Cannot read {}", dir.display()))?;
+        let entry = entry.with_context(|| format!("Cannot read {}", escape_path(dir)))?;
         let path = entry.path();
         if entry.file_name() == ".git" {
             continue;
         }
         let file_type = entry
             .file_type()
-            .with_context(|| format!("Cannot inspect {}", path.display()))?;
+            .with_context(|| format!("Cannot inspect {}", escape_path(&path)))?;
         if !file_type.is_dir() {
             if !owned {
                 loose.push(path);
@@ -288,7 +291,9 @@ fn scan(dir: &Path, owned: bool, loose: &mut Vec<PathBuf>, check: &mut RemovalCh
             continue;
         }
         match git_entry(&path)? {
-            GitEntry::Repository(why) => check.blockers.push(format!("{}: {why}", path.display())),
+            GitEntry::Repository(why) => check
+                .blockers
+                .push(format!("{}: {why}", escape_path(&path))),
             GitEntry::Worktree(repo_git_dir) => {
                 check.members.push(Member {
                     path: path.clone(),
@@ -351,7 +356,7 @@ fn unsaved_work(repo: &Path, members: &[PathBuf]) -> Result<(Vec<String>, String
             found.push(format!(
                 "{} {what}: {}",
                 plural(files.len(), "file"),
-                sample(files, |(shown, _)| shown.clone())
+                sample(files, |(shown, _)| escape(shown).into_owned())
             ));
         }
     }
@@ -494,8 +499,8 @@ fn operation_in_progress(repo: &Path) -> Result<Option<&'static str>> {
 fn relative_label(root: &Path, path: &Path) -> String {
     match path.strip_prefix(root) {
         Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
-        Ok(rel) => rel.display().to_string(),
-        Err(_) => path.display().to_string(),
+        Ok(rel) => escape_path(rel).to_string(),
+        Err(_) => escape_path(path).to_string(),
     }
 }
 

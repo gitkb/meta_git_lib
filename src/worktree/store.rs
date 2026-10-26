@@ -3,6 +3,7 @@
 //! Manages `~/.meta/worktree.json` — the persistent record of all worktrees.
 
 use anyhow::Result;
+use meta_core::display::escape_path;
 use std::path::{Path, PathBuf};
 
 use super::types::{StoreRepoEntry, WorktreeStoreData, WorktreeStoreEntry};
@@ -21,7 +22,7 @@ fn store_key(worktree_path: &Path) -> String {
         Err(e) => {
             log::debug!(
                 "Failed to canonicalize path '{}': {}. Using original path.",
-                worktree_path.display(),
+                escape_path(worktree_path),
                 e
             );
             worktree_path.to_string_lossy().into_owned()
@@ -29,7 +30,7 @@ fn store_key(worktree_path: &Path) -> String {
     }
 }
 
-fn store_path() -> PathBuf {
+fn store_path() -> Result<PathBuf> {
     meta_core::data_dir::data_file("worktree")
 }
 
@@ -38,16 +39,26 @@ fn store_lock_path(data_path: &Path) -> PathBuf {
 }
 
 /// Return (data_path, lock_path) for the worktree store.
-fn store_paths() -> (PathBuf, PathBuf) {
-    let data_path = store_path();
+fn store_paths() -> Result<(PathBuf, PathBuf)> {
+    let data_path = store_path()?;
     let lock_path = store_lock_path(&data_path);
-    (data_path, lock_path)
+    Ok((data_path, lock_path))
+}
+
+/// Whether the store file does not exist, so there is nothing to remove.
+/// Any other error (an unreadable data dir, say) is left to the update,
+/// which reports it, instead of being taken as an empty store.
+fn store_missing(data_path: &Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(data_path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    )
 }
 
 /// Add a worktree entry to the centralized store.
 pub fn store_add(worktree_path: &Path, entry: WorktreeStoreEntry) -> Result<()> {
     meta_core::data_dir::ensure_meta_dir()?;
-    let (data_path, lock_path) = store_paths();
+    let (data_path, lock_path) = store_paths()?;
     let key = store_key(worktree_path);
 
     meta_core::store::update::<WorktreeStoreData, _>(&data_path, &lock_path, |store| {
@@ -57,7 +68,7 @@ pub fn store_add(worktree_path: &Path, entry: WorktreeStoreEntry) -> Result<()> 
 
 /// Get all entries from the store.
 pub fn store_list() -> Result<WorktreeStoreData> {
-    meta_core::store::read(&store_path())
+    meta_core::store::read(&store_path()?)
 }
 
 /// Get the store key and entry for an existing worktree path, if meta
@@ -85,7 +96,7 @@ pub fn store_sets_inside(worktree_path: &Path) -> Result<Vec<String>> {
 
 /// Add repos to an existing worktree entry in the store.
 pub fn store_extend_repos(worktree_path: &Path, repos: Vec<StoreRepoEntry>) -> Result<()> {
-    let (data_path, lock_path) = store_paths();
+    let (data_path, lock_path) = store_paths()?;
     let key = store_key(worktree_path);
 
     meta_core::store::update::<WorktreeStoreData, _>(&data_path, &lock_path, move |store| {
@@ -99,8 +110,8 @@ pub fn store_extend_repos(worktree_path: &Path, repos: Vec<StoreRepoEntry>) -> R
 /// Each `(key, created_at)` pair removes the entry only if it is still the
 /// one that was read, so a worktree recreated at the same path keeps its record.
 pub fn store_remove_batch(entries: &[(String, String)]) -> Result<()> {
-    let (data_path, lock_path) = store_paths();
-    if !data_path.exists() {
+    let (data_path, lock_path) = store_paths()?;
+    if store_missing(&data_path) {
         return Ok(());
     }
 
@@ -127,8 +138,8 @@ pub fn entry_ttl_remaining(entry: &WorktreeStoreEntry, now_epoch: i64) -> Option
             Err(e) => {
                 log::warn!(
                     "Malformed created_at '{}' in store entry '{}': {}",
-                    entry.created_at,
-                    entry.name,
+                    meta_core::display::escape(&entry.created_at),
+                    meta_core::display::escape(&entry.name),
                     e
                 );
                 return i64::MAX;
@@ -559,7 +570,7 @@ mod tests {
         std::fs::create_dir_all(&store_dir).unwrap();
         std::env::set_var("META_DATA_DIR", &store_dir);
 
-        let store = store_path();
+        let store = store_path().unwrap();
 
         // Clean up by ensuring a fresh empty store
         meta_core::data_dir::ensure_meta_dir().unwrap();
