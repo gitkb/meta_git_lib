@@ -8,13 +8,16 @@ use meta_core::display::{escape, escape_path};
 use std::path::{Path, PathBuf};
 
 use super::git_ops::{git_command, remove_worktree_repos};
+use super::record::{self, SetRecord};
 
-/// A linked worktree checkout inside a set, and the git directory of the
-/// repository it belongs to (where `git worktree remove` runs).
+/// A linked worktree checkout inside a set, the git directory of the
+/// repository it belongs to (where `git worktree remove` runs), and meta's
+/// record of creating it, if it has one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Member {
     pub path: PathBuf,
     pub repo_git_dir: PathBuf,
+    pub record: Option<SetRecord>,
 }
 
 /// What deleting a worktree set would destroy.
@@ -22,8 +25,9 @@ pub struct Member {
 pub struct RemovalCheck {
     /// Every linked worktree in the set, nested and hidden ones included.
     pub members: Vec<Member>,
-    /// Repositories that aren't linked worktrees, and checkouts git can't
-    /// inspect. No flag overrides these.
+    /// Repositories that aren't linked worktrees, checkouts git can't
+    /// inspect, and worktrees meta recorded for another set. No flag
+    /// overrides these.
     pub blockers: Vec<String>,
     /// Work that deleting the set would lose. `--force` may discard it.
     pub unsaved: Vec<String>,
@@ -39,6 +43,13 @@ impl RemovalCheck {
     pub fn is_clear(&self) -> bool {
         self.blockers.is_empty() && self.unsaved.is_empty()
     }
+
+    /// Meta's record of creating the set, if a worktree in it has one. A
+    /// record naming another set is a blocker, so without blockers every
+    /// record found names this set.
+    pub fn record(&self) -> Option<&SetRecord> {
+        self.members.iter().find_map(|m| m.record.as_ref())
+    }
 }
 
 /// Inspect a worktree set before deleting it.
@@ -48,7 +59,9 @@ impl RemovalCheck {
 /// worktree of its repository) and on checkouts git cannot inspect. Reports
 /// as unsaved: uncommitted or untracked changes, commits that no branch, tag
 /// or remote ref holds, and files that no repository holds. Ignored files count as disposable, as
-/// they do for `git worktree remove`.
+/// they do for `git worktree remove`. Blocks on a worktree whose record
+/// (see [`record`]) names another set, such as a set nested in this one, or
+/// whose record can't be read.
 pub fn check_worktree_removal(wt_dir: &Path) -> Result<RemovalCheck> {
     let mut check = RemovalCheck::default();
     if wt_dir.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
@@ -58,12 +71,12 @@ pub fn check_worktree_removal(wt_dir: &Path) -> Result<RemovalCheck> {
         ));
         return Ok(check);
     }
+    let set = wt_dir
+        .canonicalize()
+        .with_context(|| format!("Cannot resolve {}", escape_path(wt_dir)))?;
     let root_owned = match git_entry(wt_dir)? {
-        GitEntry::Worktree(repo_git_dir) => {
-            check.members.push(Member {
-                path: wt_dir.to_path_buf(),
-                repo_git_dir,
-            });
+        GitEntry::Worktree(dirs) => {
+            add_member(&mut check, &set, wt_dir, dirs);
             true
         }
         GitEntry::Repository(why) => {
@@ -75,11 +88,25 @@ pub fn check_worktree_removal(wt_dir: &Path) -> Result<RemovalCheck> {
         GitEntry::None => false,
     };
     let mut loose = Vec::new();
-    scan(wt_dir, root_owned, &mut loose, &mut check)?;
+    scan(&set, wt_dir, root_owned, &mut loose, &mut check)?;
     // A stable order, so two checks of an unchanged set compare equal.
     check.members.sort_by(|a, b| a.path.cmp(&b.path));
     check.blockers.sort();
     loose.sort();
+
+    // Another set's records are blockers already
+    let mut records = check
+        .members
+        .iter()
+        .filter_map(|m| m.record.as_ref().filter(|r| r.set == set));
+    if let Some(first) = records.next() {
+        if records.any(|r| r != first) {
+            check.blockers.push(format!(
+                "{}: its worktrees hold different records of meta creating it",
+                escape_path(wt_dir)
+            ));
+        }
+    }
 
     let paths: Vec<PathBuf> = check.members.iter().map(|m| m.path.clone()).collect();
     for member in &paths {
@@ -127,9 +154,10 @@ fn file_fingerprint(path: &Path) -> String {
 /// Delete a set that [`check_worktree_removal`] inspected, and nothing else.
 ///
 /// Checks the set again first and refuses if anything changed since `check`
-/// (prune checks many sets before deleting any). Then unregisters the checked
-/// worktrees (stopping at the first failure), deletes the files outside every
-/// repository only if `force`, and removes the directories left empty.
+/// (prune checks many sets before deleting any). Then deletes the files
+/// outside every repository only if `force`, unregisters the checked
+/// worktrees (stopping at the first failure), and removes the directories
+/// left empty.
 /// Anything outside the checked worktrees that is still there is reported
 /// and left in place. meta doesn't lock out other processes, so a write into
 /// the set during the deletion itself can still be lost.
@@ -145,12 +173,14 @@ pub fn delete_checked_set(
             escape_path(wt_dir)
         );
     }
-    remove_worktree_repos(&check.members, force, verbose)?;
+    // Loose files first: git deletes each worktree's record with it, so a
+    // set that fails here is still meta's to remove on a retry.
     if force {
         for path in &check.loose {
             remove_entry(path).with_context(|| format!("Cannot delete {}", escape_path(path)))?;
         }
     }
+    remove_worktree_repos(&check.members, force, verbose)?;
     remove_empty_dirs(wt_dir)?;
     if wt_dir.symlink_metadata().is_ok() {
         let left: Vec<PathBuf> = std::fs::read_dir(wt_dir)
@@ -195,9 +225,58 @@ fn remove_empty_dirs(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Add the linked worktree at `path`, with its admin directory and its
+/// repository's git directory, to the members of the set resolved to `set`.
+fn add_member(
+    check: &mut RemovalCheck,
+    set: &Path,
+    path: &Path,
+    (admin, repo_git_dir): (PathBuf, PathBuf),
+) {
+    // Git keeps every worktree's admin directory in its repository's
+    // `worktrees` directory; a record anywhere else is no proof of anything.
+    let registered = || -> Option<bool> {
+        Some(
+            admin.canonicalize().ok()?.parent()?
+                == repo_git_dir.canonicalize().ok()?.join("worktrees"),
+        )
+    };
+    let record = match record::read(&admin) {
+        Ok(Some(_)) if registered() != Some(true) => {
+            check.blockers.push(format!(
+                "{}: its git metadata {} is not where git keeps a worktree's",
+                escape_path(path),
+                escape_path(&admin)
+            ));
+            None
+        }
+        Ok(record) => record,
+        Err(e) => {
+            check.blockers.push(format!(
+                "{}: cannot read meta's record of it ({e:#})",
+                escape_path(path)
+            ));
+            None
+        }
+    };
+    if let Some(other) = record.as_ref().filter(|r| r.set != set) {
+        check.blockers.push(format!(
+            "{}: meta created it for another worktree set, {}; remove that one first",
+            escape_path(path),
+            escape_path(&other.set)
+        ));
+    }
+    check.members.push(Member {
+        path: path.to_path_buf(),
+        repo_git_dir,
+        record,
+    });
+}
+
 enum GitEntry {
-    /// A linked worktree, with its repository's git directory.
-    Worktree(PathBuf),
+    /// A linked worktree, with its admin directory and its repository's git
+    /// directory.
+    Worktree((PathBuf, PathBuf)),
     /// A repository of its own, or a checkout meta can't attribute to one.
     Repository(String),
     None,
@@ -206,8 +285,8 @@ enum GitEntry {
 fn git_entry(dir: &Path) -> Result<GitEntry> {
     let git = dir.join(".git");
     match git.symlink_metadata() {
-        Ok(meta) if meta.is_file() => Ok(match linked_worktree_git_dir(dir) {
-            Ok(repo_git_dir) => GitEntry::Worktree(repo_git_dir),
+        Ok(meta) if meta.is_file() => Ok(match linked_worktree_dirs(dir) {
+            Ok(dirs) => GitEntry::Worktree(dirs),
             Err(e) => GitEntry::Repository(format!("not a linked worktree ({e:#})")),
         }),
         Ok(_) => Ok(GitEntry::Repository(
@@ -227,11 +306,17 @@ fn git_entry(dir: &Path) -> Result<GitEntry> {
     }
 }
 
-/// Follow a checkout's `.git` file to its repository's git directory,
-/// requiring the linked-worktree layout: an admin directory with a
-/// `commondir` and a `gitdir` that points back at this checkout. A
-/// `--separate-git-dir` checkout or a submodule fails this.
-fn linked_worktree_git_dir(checkout: &Path) -> Result<PathBuf> {
+/// The admin directory of the linked worktree checked out at `checkout`, in
+/// its repository's git directory (see [`linked_worktree_dirs`]).
+pub fn linked_worktree_admin_dir(checkout: &Path) -> Result<PathBuf> {
+    linked_worktree_dirs(checkout).map(|(admin, _)| admin)
+}
+
+/// Follow a checkout's `.git` file to its admin directory and its
+/// repository's git directory, requiring the linked-worktree layout: an
+/// admin directory with a `commondir` and a `gitdir` that points back at
+/// this checkout. A `--separate-git-dir` checkout or a submodule fails this.
+pub fn linked_worktree_dirs(checkout: &Path) -> Result<(PathBuf, PathBuf)> {
     let git_file = checkout.join(".git");
     let content = std::fs::read_to_string(&git_file).context("cannot read .git")?;
     let admin = content
@@ -267,12 +352,19 @@ fn linked_worktree_git_dir(checkout: &Path) -> Result<PathBuf> {
          'git worktree repair' in its repository)",
         escape_path(&admin)
     );
-    Ok(admin.join(common.trim()))
+    let common = admin.join(common.trim());
+    Ok((admin, common))
 }
 
 /// Walk the set without following links. `owned` means a repository above
 /// `dir` accounts for its files.
-fn scan(dir: &Path, owned: bool, loose: &mut Vec<PathBuf>, check: &mut RemovalCheck) -> Result<()> {
+fn scan(
+    set: &Path,
+    dir: &Path,
+    owned: bool,
+    loose: &mut Vec<PathBuf>,
+    check: &mut RemovalCheck,
+) -> Result<()> {
     let entries =
         std::fs::read_dir(dir).with_context(|| format!("Cannot read {}", escape_path(dir)))?;
     for entry in entries {
@@ -294,14 +386,11 @@ fn scan(dir: &Path, owned: bool, loose: &mut Vec<PathBuf>, check: &mut RemovalCh
             GitEntry::Repository(why) => check
                 .blockers
                 .push(format!("{}: {why}", escape_path(&path))),
-            GitEntry::Worktree(repo_git_dir) => {
-                check.members.push(Member {
-                    path: path.clone(),
-                    repo_git_dir,
-                });
-                scan(&path, true, loose, check)?;
+            GitEntry::Worktree(dirs) => {
+                add_member(check, set, &path, dirs);
+                scan(set, &path, true, loose, check)?;
             }
-            GitEntry::None => scan(&path, owned, loose, check)?,
+            GitEntry::None => scan(set, &path, owned, loose, check)?,
         }
     }
     Ok(())
@@ -579,6 +668,104 @@ mod tests {
                 set.join(".scratch").join("leaf"),
                 set.join("sub").join("leaf")
             ]
+        );
+    }
+
+    fn set_record(set: &Path) -> SetRecord {
+        SetRecord {
+            set: set.canonicalize().unwrap(),
+            project: set.to_path_buf(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            ephemeral: false,
+            ttl_seconds: None,
+            custom: Default::default(),
+        }
+    }
+
+    fn mark(checkout: &Path, record: &SetRecord) {
+        record::write(&linked_worktree_admin_dir(checkout).unwrap(), record).unwrap();
+    }
+
+    #[test]
+    fn records_name_their_set_and_block_any_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let set = tmp.path().join("set");
+        repo_with_worktree(tmp.path(), "root", &set);
+        repo_with_worktree(tmp.path(), "leaf", &set.join("leaf"));
+        // A worktree git made by hand carries no record
+        let check = check_worktree_removal(&set).unwrap();
+        assert!(check.is_clear() && check.record().is_none(), "{check:?}");
+
+        let record = set_record(&set);
+        mark(&set, &record);
+        let check = check_worktree_removal(&set).unwrap();
+        assert!(check.is_clear(), "{check:?}");
+        assert_eq!(check.record(), Some(&record));
+
+        // A set nested in this one is another set's
+        let inner = set.join("inner");
+        repo_with_worktree(tmp.path(), "inner", &inner);
+        mark(&inner, &set_record(&inner));
+        let check = check_worktree_removal(&set).unwrap();
+        assert_eq!(check.blockers.len(), 1, "{check:?}");
+        assert!(
+            check.blockers[0].contains("another worktree set"),
+            "{check:?}"
+        );
+        // and the inner set is clear on its own
+        assert!(check_worktree_removal(&inner).unwrap().is_clear());
+    }
+
+    #[test]
+    fn records_that_differ_or_sit_outside_git_layout_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let set = tmp.path().join("set");
+        repo_with_worktree(tmp.path(), "root", &set);
+        repo_with_worktree(tmp.path(), "leaf", &set.join("leaf"));
+        let record = set_record(&set);
+        mark(&set, &record);
+        let mut later = record.clone();
+        later.ttl_seconds = Some(0);
+        mark(&set.join("leaf"), &later);
+        let check = check_worktree_removal(&set).unwrap();
+        assert!(
+            check
+                .blockers
+                .iter()
+                .any(|b| b.contains("different records")),
+            "{check:?}"
+        );
+
+        // A checkout pointing at a copied admin directory with a record in
+        // it: the backlink holds, but git doesn't keep it there
+        let fake = tmp.path().join("fake");
+        repo_with_worktree(tmp.path(), "real", &fake.join("real"));
+        let admin = linked_worktree_admin_dir(&fake.join("real")).unwrap();
+        let copy = fake.join("admin");
+        std::fs::create_dir(&copy).unwrap();
+        for file in ["HEAD", "commondir", "gitdir"] {
+            std::fs::copy(admin.join(file), copy.join(file)).unwrap();
+        }
+        let common = std::fs::read_to_string(admin.join("commondir")).unwrap();
+        std::fs::write(
+            copy.join("commondir"),
+            admin.join(common.trim()).to_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            fake.join("real/.git"),
+            format!("gitdir: {}", copy.display()),
+        )
+        .unwrap();
+        mark(&fake.join("real"), &set_record(&fake));
+        let check = check_worktree_removal(&fake).unwrap();
+        assert!(check.record().is_none(), "{check:?}");
+        assert!(
+            check
+                .blockers
+                .iter()
+                .any(|b| b.contains("not where git keeps")),
+            "{check:?}"
         );
     }
 

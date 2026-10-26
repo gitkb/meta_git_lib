@@ -1,6 +1,6 @@
 //! Types for worktree management.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -39,16 +39,6 @@ impl std::str::FromStr for RepoSpec {
     }
 }
 
-impl From<&CreateRepoEntry> for StoreRepoEntry {
-    fn from(r: &CreateRepoEntry) -> Self {
-        StoreRepoEntry {
-            alias: r.alias.clone(),
-            branch: r.branch.clone(),
-            created_branch: r.created_branch,
-        }
-    }
-}
-
 // ==================== Internal Types ====================
 
 /// Resolved worktree context for operations that need meta_dir, worktree_root, and worktree path.
@@ -56,36 +46,6 @@ pub struct WorktreeContext {
     pub meta_dir: Option<PathBuf>,
     pub worktree_root: PathBuf,
     pub wt_dir: PathBuf,
-}
-
-// ==================== Centralized Store Types ====================
-
-/// Top-level store structure at `~/.meta/worktree.json`.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct WorktreeStoreData {
-    pub worktrees: HashMap<String, WorktreeStoreEntry>,
-}
-
-/// Individual worktree entry in the centralized store.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorktreeStoreEntry {
-    pub name: String,
-    pub project: String,
-    pub created_at: String,
-    pub ephemeral: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttl_seconds: Option<u64>,
-    pub repos: Vec<StoreRepoEntry>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub custom: HashMap<String, String>,
-}
-
-/// Repo entry within a store entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoreRepoEntry {
-    pub alias: String,
-    pub branch: String,
-    pub created_branch: bool,
 }
 
 // ==================== JSON Output Structures ====================
@@ -292,33 +252,5 @@ mod tests {
         let input = "meta_cli:my-branch";
         let spec: RepoSpec = input.parse().unwrap();
         assert_eq!(spec.to_string(), input);
-    }
-
-    // ── StoreRepoEntry From<CreateRepoEntry> ────────────────
-
-    #[test]
-    fn store_entry_from_create_entry() {
-        let create = CreateRepoEntry {
-            alias: "lib".to_string(),
-            path: "/tmp/lib".to_string(),
-            branch: "main".to_string(),
-            created_branch: true,
-        };
-        let store: StoreRepoEntry = StoreRepoEntry::from(&create);
-        assert_eq!(store.alias, "lib");
-        assert_eq!(store.branch, "main");
-        assert!(store.created_branch);
-    }
-
-    #[test]
-    fn store_entry_from_create_entry_no_created_branch() {
-        let create = CreateRepoEntry {
-            alias: "app".to_string(),
-            path: "/tmp/app".to_string(),
-            branch: "develop".to_string(),
-            created_branch: false,
-        };
-        let store: StoreRepoEntry = StoreRepoEntry::from(&create);
-        assert!(!store.created_branch);
     }
 }
