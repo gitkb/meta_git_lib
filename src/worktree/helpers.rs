@@ -97,12 +97,16 @@ pub fn read_worktrees_dir_from_config(meta_dir: &Path) -> Result<Option<String>>
 pub fn find_meta_dir() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     meta_core::config::find_meta_config(&cwd, None)
+        .ok()
+        .flatten()
         .map(|(path, _)| path.parent().unwrap_or(Path::new(".")).to_path_buf())
 }
 
 /// Like `find_meta_dir()` but returns an error if not found.
 pub fn require_meta_dir() -> Result<PathBuf> {
-    find_meta_dir().ok_or_else(|| anyhow::anyhow!("Not inside a meta project (no .meta found)"))
+    let cwd = std::env::current_dir()?;
+    meta_core::config::find_workspace_root(&cwd)?
+        .ok_or_else(|| anyhow::anyhow!("Not inside a meta project (no .meta found)"))
 }
 
 /// The directory of the worktree set `name` under `worktree_root`. A symlink
@@ -175,7 +179,7 @@ pub fn discover_and_validate_worktree(
 
 /// Load and parse the .meta config, returning the project list.
 pub fn load_projects(meta_dir: &Path) -> Result<Vec<meta_core::config::ProjectInfo>> {
-    let (config_path, _) = meta_core::config::find_meta_config(meta_dir, None)
+    let (config_path, _) = meta_core::config::find_meta_config(meta_dir, None)?
         .ok_or_else(|| anyhow::anyhow!("No .meta config found in {}", escape_path(meta_dir)))?;
     let (projects, _) = meta_core::config::parse_meta_config(&config_path)?;
     Ok(projects)
