@@ -9,6 +9,7 @@ pub mod hooks;
 pub mod record;
 pub mod safety;
 pub mod types;
+pub mod workspace;
 
 // Re-export commonly-used types
 pub use types::RepoSpec;
