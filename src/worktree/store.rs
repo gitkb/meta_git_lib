@@ -138,8 +138,8 @@ pub fn entry_ttl_remaining(entry: &WorktreeStoreEntry, now_epoch: i64) -> Option
             Err(e) => {
                 log::warn!(
                     "Malformed created_at '{}' in store entry '{}': {}",
-                    entry.created_at,
-                    entry.name,
+                    meta_core::display::escape(&entry.created_at),
+                    meta_core::display::escape(&entry.name),
                     e
                 );
                 return i64::MAX;

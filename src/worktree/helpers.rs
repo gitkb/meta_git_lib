@@ -453,7 +453,10 @@ pub fn ensure_worktrees_in_gitignore(
         std::fs::write(&gitignore_path, format!("{pattern}\n"))?;
     }
     if !quiet {
-        log::info!("Added '{pattern}' to .gitignore");
+        log::info!(
+            "Added '{}' to .gitignore",
+            meta_core::display::escape(&pattern)
+        );
     }
     Ok(())
 }
