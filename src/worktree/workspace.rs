@@ -26,9 +26,9 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// The workspace `meta_dir` belongs to (see [`workspace_root`]).
+    /// The workspace `meta_dir` belongs to (see [`meta_core::config::workspace_root`]).
     pub fn of(meta_dir: &Path) -> Workspace {
-        let root = workspace_root(meta_dir);
+        let root = meta_core::config::workspace_root(meta_dir);
         let mut paths = vec![root.clone()];
         let mut unreadable = Vec::new();
         match meta_core::config::walk_meta_tree(&root, None) {
@@ -94,35 +94,6 @@ impl Workspace {
     }
 }
 
-/// The root of the workspace `meta_dir` belongs to: `meta_dir`, or the
-/// nearest meta directory above it whose project tree lists it, and so on
-/// upward. A meta directory its parent doesn't list (or whose parent's tree
-/// can't be read) is a workspace of its own.
-pub fn workspace_root(meta_dir: &Path) -> PathBuf {
-    let mut root = meta_dir.to_path_buf();
-    for parent in meta_dir.ancestors().skip(1) {
-        match meta_core::config::find_meta_config_in(parent) {
-            Ok(None) => continue,
-            Ok(Some(_)) if lists(parent, &root) => root = parent.to_path_buf(),
-            _ => break,
-        }
-    }
-    root
-}
-
-/// Whether the project tree of the meta directory `parent` lists `dir`.
-fn lists(parent: &Path, dir: &Path) -> bool {
-    let (Ok(tree), Ok(dir)) = (
-        meta_core::config::walk_meta_tree(parent, None),
-        dir.canonicalize(),
-    ) else {
-        return false;
-    };
-    meta_core::config::build_project_map(&tree, parent, "")
-        .into_values()
-        .any(|(path, _)| path.canonicalize().is_ok_and(|path| path == dir))
-}
-
 /// The git directory holding the worktrees of the repository at `repo`:
 /// `None` if there is no repository there (not cloned).
 pub fn repo_git_dir(repo: &Path) -> Result<Option<PathBuf>> {
@@ -163,39 +134,5 @@ pub fn repo_git_dir(repo: &Path) -> Result<Option<PathBuf>> {
         Err(e) => {
             Err(anyhow::Error::from(e).context(format!("Cannot read {}", escape_path(&commondir))))
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn config(dir: &Path, projects: &str) {
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(
-            dir.join(".meta.json"),
-            format!(r#"{{"projects": {{{projects}}}}}"#),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn the_root_climbs_only_through_parents_that_list_the_child() {
-        let tmp = tempfile::tempdir().unwrap();
-        let top = tmp.path().canonicalize().unwrap();
-        config(&top, r#""inner": {"repo": "x", "meta": true}"#);
-        config(&top.join("inner"), r#""deep": {"repo": "x", "meta": true}"#);
-        config(&top.join("inner/deep"), "");
-        assert_eq!(workspace_root(&top.join("inner/deep")), top);
-        assert_eq!(workspace_root(&top.join("inner")), top);
-
-        // A workspace inside another that doesn't list it is its own
-        let unlisted = top.join("inner/elsewhere");
-        config(&unlisted, "");
-        assert_eq!(workspace_root(&unlisted), unlisted);
-        // and so is one under a directory without a config
-        let below = top.join("plain/sub");
-        config(&below, "");
-        assert_eq!(workspace_root(&below), below);
     }
 }

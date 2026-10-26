@@ -105,7 +105,7 @@ pub fn find_meta_dir() -> Option<PathBuf> {
 /// Like `find_meta_dir()` but returns an error if not found.
 pub fn require_meta_dir() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
-    meta_core::config::find_workspace_root(&cwd)?
+    meta_core::config::nearest_meta_dir(&cwd)?
         .ok_or_else(|| anyhow::anyhow!("Not inside a meta project (no .meta found)"))
 }
 
