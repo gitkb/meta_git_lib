@@ -302,7 +302,7 @@ fn trusted_record(admin: &Path, repo_git_dir: &Path) -> Result<Option<SetRecord>
     let registered = || -> Option<bool> {
         Some(
             admin.canonicalize().ok()?.parent()?
-                == repo_git_dir.canonicalize().ok()?.join("worktrees"),
+                == repo_git_dir.join("worktrees").canonicalize().ok()?,
         )
     };
     anyhow::ensure!(
@@ -810,6 +810,28 @@ mod tests {
         // nor does `add` find it to copy into the worktrees it adds
         assert!(member_record(&fake.join("real")).is_err());
         assert_eq!(record::find(&fake, [fake.join("real")]), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_record_is_trusted_when_the_worktrees_dir_is_a_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("root");
+        std::fs::create_dir_all(&source).unwrap();
+        git(&source, &["init", "-q"]);
+        git(&source, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        std::fs::create_dir(source.join(".git/real-worktrees")).unwrap();
+        std::os::unix::fs::symlink("real-worktrees", source.join(".git/worktrees")).unwrap();
+        let set = tmp.path().join("set");
+        git(
+            &source,
+            &["worktree", "add", "-q", "-b", "s", set.to_str().unwrap()],
+        );
+        let record = set_record(&set);
+        mark(&set, &record);
+        let check = check_worktree_removal(&set).unwrap();
+        assert!(check.is_clear(), "{check:?}");
+        assert_eq!(check.record(), Some(&record));
     }
 
     #[test]
