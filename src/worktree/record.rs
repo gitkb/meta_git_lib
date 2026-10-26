@@ -110,17 +110,31 @@ pub fn find<P: AsRef<Path>>(
 }
 
 /// Every record in the worktree admin directories of the repository whose
-/// git directory is `git_dir`, by admin directory; a record that can't be
-/// read is there as its error.
+/// git directory is `git_dir`, by admin directory. A record, or a
+/// directory, that can't be read is there as its error: a set it would
+/// have shown must not be taken as absent.
 pub fn in_repo(git_dir: &Path) -> Vec<(PathBuf, Result<SetRecord>)> {
-    let Ok(entries) = std::fs::read_dir(git_dir.join("worktrees")) else {
-        return Vec::new();
+    let worktrees = git_dir.join("worktrees");
+    let entries = match std::fs::read_dir(&worktrees) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            let e =
+                anyhow::Error::from(e).context(format!("Cannot read {}", escape_path(&worktrees)));
+            return vec![(worktrees, Err(e))];
+        }
     };
     entries
-        .flatten()
-        .filter_map(|entry| {
-            let admin = entry.path();
-            read(&admin).transpose().map(|record| (admin, record))
+        .filter_map(|entry| match entry {
+            Ok(entry) => {
+                let admin = entry.path();
+                read(&admin).transpose().map(|record| (admin, record))
+            }
+            Err(e) => Some((
+                worktrees.clone(),
+                Err(anyhow::Error::from(e)
+                    .context(format!("Cannot read {}", escape_path(&worktrees)))),
+            )),
         })
         .collect()
 }
