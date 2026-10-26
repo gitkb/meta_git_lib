@@ -412,7 +412,7 @@ fn unsaved_work(repo: &Path, members: &[PathBuf]) -> Result<(Vec<String>, String
         found,
         format!(
             "{}\0{text}\0{commits}\0{staged}\0{}\0{operation:?}",
-            escape_path(repo),
+            repo.display(),
             files.join("\n")
         ),
     ))
