@@ -92,28 +92,27 @@ pub fn delete(admin: &Path) -> Result<()> {
 }
 
 /// Meta's record of creating the set at `set`, from the first of its
-/// worktrees `checkouts` whose record names it. Worktrees whose record
-/// can't be read are passed over: this finds metadata, it doesn't prove
-/// anything (the removal check does).
+/// worktrees `checkouts` with a trusted record naming it (see
+/// [`super::safety::member_record`]). Worktrees whose record can't be used
+/// are passed over: the removal check blocks on them.
 pub fn find<P: AsRef<Path>>(
     set: &Path,
     checkouts: impl IntoIterator<Item = P>,
 ) -> Option<SetRecord> {
     let set = set.canonicalize().ok()?;
     checkouts.into_iter().find_map(|checkout| {
-        let admin = super::safety::linked_worktree_admin_dir(checkout.as_ref()).ok()?;
-        read(&admin)
+        super::safety::member_record(checkout.as_ref())
             .ok()
             .flatten()
+            .map(|(_, record)| record)
             .filter(|record| record.set == set)
     })
 }
 
 /// Every record in the worktree admin directories of the repository whose
-/// git directory is `git_dir`, with the admin directory it is in. Admin
-/// directories that can't be read are skipped: their worktrees are found
-/// again, and checked, through the set they are in.
-pub fn in_repo(git_dir: &Path) -> Vec<(PathBuf, SetRecord)> {
+/// git directory is `git_dir`, by admin directory; a record that can't be
+/// read is there as its error.
+pub fn in_repo(git_dir: &Path) -> Vec<(PathBuf, Result<SetRecord>)> {
     let Ok(entries) = std::fs::read_dir(git_dir.join("worktrees")) else {
         return Vec::new();
     };
@@ -121,13 +120,7 @@ pub fn in_repo(git_dir: &Path) -> Vec<(PathBuf, SetRecord)> {
         .flatten()
         .filter_map(|entry| {
             let admin = entry.path();
-            match read(&admin) {
-                Ok(record) => record.map(|record| (admin, record)),
-                Err(e) => {
-                    log::debug!("Skipping {}: {e:#}", escape_path(&admin));
-                    None
-                }
-            }
+            read(&admin).transpose().map(|record| (admin, record))
         })
         .collect()
 }
@@ -181,7 +174,10 @@ mod tests {
         r.custom.insert("k".into(), "v".into());
         write(&admin, &r).unwrap();
         assert_eq!(read(&admin).unwrap(), Some(r.clone()));
-        assert_eq!(in_repo(temp.path()), vec![(admin.clone(), r)]);
+        let found = in_repo(temp.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, admin);
+        assert_eq!(found[0].1.as_ref().unwrap(), &r);
 
         delete(&admin).unwrap();
         delete(&admin).unwrap();

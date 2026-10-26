@@ -233,27 +233,11 @@ fn add_member(
     path: &Path,
     (admin, repo_git_dir): (PathBuf, PathBuf),
 ) {
-    // Git keeps every worktree's admin directory in its repository's
-    // `worktrees` directory; a record anywhere else is no proof of anything.
-    let registered = || -> Option<bool> {
-        Some(
-            admin.canonicalize().ok()?.parent()?
-                == repo_git_dir.canonicalize().ok()?.join("worktrees"),
-        )
-    };
-    let record = match record::read(&admin) {
-        Ok(Some(_)) if registered() != Some(true) => {
-            check.blockers.push(format!(
-                "{}: its git metadata {} is not where git keeps a worktree's",
-                escape_path(path),
-                escape_path(&admin)
-            ));
-            None
-        }
+    let record = match trusted_record(&admin, &repo_git_dir) {
         Ok(record) => record,
         Err(e) => {
             check.blockers.push(format!(
-                "{}: cannot read meta's record of it ({e:#})",
+                "{}: meta's record of it can't be used ({e:#})",
                 escape_path(path)
             ));
             None
@@ -266,11 +250,51 @@ fn add_member(
             escape_path(&other.set)
         ));
     }
+    // git refuses to remove a locked worktree, which would stop a removal
+    // halfway
+    if admin.join("locked").symlink_metadata().is_ok() {
+        check.blockers.push(format!(
+            "{}: git has it locked; run 'git worktree unlock' on it first",
+            escape_path(path)
+        ));
+    }
     check.members.push(Member {
         path: path.to_path_buf(),
         repo_git_dir,
         record,
     });
+}
+
+/// Meta's record of the linked worktree checked out at `checkout`, with its
+/// admin directory: `None` if it isn't a linked worktree or has no record,
+/// an error if it has a record that can't be trusted.
+pub fn member_record(checkout: &Path) -> Result<Option<(PathBuf, SetRecord)>> {
+    let Ok((admin, repo_git_dir)) = linked_worktree_dirs(checkout) else {
+        return Ok(None);
+    };
+    Ok(trusted_record(&admin, &repo_git_dir)?.map(|record| (admin, record)))
+}
+
+/// The record in `admin`, the admin directory of a worktree of the
+/// repository whose git directory is `repo_git_dir`. Git keeps every
+/// worktree's admin directory in its repository's `worktrees` directory; a
+/// record anywhere else is no proof of anything, and an error.
+fn trusted_record(admin: &Path, repo_git_dir: &Path) -> Result<Option<SetRecord>> {
+    let Some(record) = record::read(admin)? else {
+        return Ok(None);
+    };
+    let registered = || -> Option<bool> {
+        Some(
+            admin.canonicalize().ok()?.parent()?
+                == repo_git_dir.canonicalize().ok()?.join("worktrees"),
+        )
+    };
+    anyhow::ensure!(
+        registered() == Some(true),
+        "its git metadata {} is not where git keeps a worktree's",
+        escape_path(admin)
+    );
+    Ok(Some(record))
 }
 
 enum GitEntry {
@@ -765,6 +789,25 @@ mod tests {
                 .blockers
                 .iter()
                 .any(|b| b.contains("not where git keeps")),
+            "{check:?}"
+        );
+        // nor does `add` find it to copy into the worktrees it adds
+        assert!(member_record(&fake.join("real")).is_err());
+        assert_eq!(record::find(&fake, [fake.join("real")]), None);
+    }
+
+    #[test]
+    fn a_locked_worktree_blocks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let set = tmp.path().join("set");
+        repo_with_worktree(tmp.path(), "root", &set);
+        git(
+            &tmp.path().join("root"),
+            &["worktree", "lock", set.to_str().unwrap()],
+        );
+        let check = check_worktree_removal(&set).unwrap();
+        assert!(
+            check.blockers.iter().any(|b| b.contains("locked")),
             "{check:?}"
         );
     }
