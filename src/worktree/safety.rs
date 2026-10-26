@@ -33,6 +33,10 @@ pub struct RemovalCheck {
     pub unsaved: Vec<String>,
     /// Files outside every repository (part of `unsaved`).
     pub loose: Vec<PathBuf>,
+    /// Records that can't be used (part of `blockers`). They block removal
+    /// as a proof of ownership; a create rolling back the set it just
+    /// claimed needs no such proof.
+    pub unusable_records: Vec<String>,
     /// Each checkout's complete git status, stranded commit ids, and the size
     /// and modification time of every file `unsaved` lists, so a re-check
     /// sees changes the abbreviated lines would hide, rewrites included.
@@ -236,10 +240,12 @@ fn add_member(
     let record = match trusted_record(&admin, &repo_git_dir) {
         Ok(record) => record,
         Err(e) => {
-            check.blockers.push(format!(
+            let why = format!(
                 "{}: meta's record of it can't be used ({e:#})",
                 escape_path(path)
-            ));
+            );
+            check.unusable_records.push(why.clone());
+            check.blockers.push(why);
             None
         }
     };
