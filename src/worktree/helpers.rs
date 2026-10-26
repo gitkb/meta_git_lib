@@ -1,7 +1,8 @@
 //! Utility functions for worktree management.
 
 use anyhow::{Context, Result};
-use meta_core::display::escape_path;
+use meta_core::config::ConfigFormat;
+use meta_core::display::{escape, escape_path};
 use std::path::{Path, PathBuf};
 
 use super::types::WorktreeContext;
@@ -10,17 +11,18 @@ pub fn validate_worktree_name(name: &str) -> Result<()> {
     if name.is_empty() {
         anyhow::bail!("Worktree name cannot be empty");
     }
+    let shown = escape(name);
     if name.starts_with('.') {
-        anyhow::bail!("Invalid worktree name '{name}': cannot start with '.'");
+        anyhow::bail!("Invalid worktree name '{shown}': cannot start with '.'");
     }
     if name.contains('/') || name.contains('\\') {
-        anyhow::bail!("Invalid worktree name '{name}': cannot contain path separators");
+        anyhow::bail!("Invalid worktree name '{shown}': cannot contain path separators");
     }
     if !name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        anyhow::bail!("Invalid worktree name '{name}': only ASCII alphanumeric characters, hyphens, and underscores allowed");
+        anyhow::bail!("Invalid worktree name '{shown}': only ASCII alphanumeric characters, hyphens, and underscores allowed");
     }
     Ok(())
 }
@@ -38,7 +40,7 @@ pub fn resolve_worktree_root(meta_dir: Option<&Path>) -> Result<PathBuf> {
         if let Some((config, _)) = meta_core::config::find_meta_config_in(dir)? {
             meta_core::config::parse_meta_config(&config)?;
         }
-        if let Some(configured) = read_worktrees_dir_from_config(dir) {
+        if let Some(configured) = read_worktrees_dir_from_config(dir)? {
             // Worktrees are created and removed there, so a committed config
             // may not point it outside the workspace
             let relative = meta_core::config::relative_dir(dir, &configured).map_err(|why| {
@@ -67,38 +69,29 @@ pub fn resolve_worktree_root(meta_dir: Option<&Path>) -> Result<PathBuf> {
     Ok(cwd.join(".worktrees"))
 }
 
-/// Read and parse the .meta config as a JSON Value.
-/// Tries .meta, .meta.json, .meta.yaml, .meta.yml in order, parsing JSON or YAML as appropriate.
-pub fn read_meta_config_value(meta_dir: &Path) -> Option<serde_json::Value> {
-    for name in &[".meta", ".meta.json", ".meta.yaml", ".meta.yml"] {
-        let path = meta_dir.join(name);
-        if !path.exists() || !path.is_file() {
-            continue;
-        }
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        // Try JSON first
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-            return Some(v);
-        }
-        // Try YAML
-        if let Ok(v) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&content) {
-            // Convert YAML Value to JSON Value for uniform access
-            if let Ok(json_val) = serde_json::to_value(v) {
-                return Some(json_val);
-            }
-        }
-    }
-    None
+/// The config file in `meta_dir` (see
+/// [`meta_core::config::find_meta_config_in`]) as a JSON value, if there is
+/// one. One that can't be read or parsed is an error.
+pub fn read_meta_config_value(meta_dir: &Path) -> Result<Option<serde_json::Value>> {
+    let Some((path, format)) = meta_core::config::find_meta_config_in(meta_dir)? else {
+        return Ok(None);
+    };
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("Cannot read {}", escape_path(&path)))?;
+    let value = match format {
+        ConfigFormat::Json => serde_json::from_str(&content).map_err(anyhow::Error::from),
+        ConfigFormat::Yaml => serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&content)
+            .map_err(anyhow::Error::from)
+            .and_then(|v| serde_json::to_value(v).map_err(anyhow::Error::from)),
+    };
+    value
+        .map(Some)
+        .with_context(|| format!("Cannot parse {}", escape_path(&path)))
 }
 
-pub fn read_worktrees_dir_from_config(meta_dir: &Path) -> Option<String> {
-    read_meta_config_value(meta_dir)?
-        .get("worktrees_dir")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+pub fn read_worktrees_dir_from_config(meta_dir: &Path) -> Result<Option<String>> {
+    Ok(read_meta_config_value(meta_dir)?
+        .and_then(|config| config.get("worktrees_dir")?.as_str().map(str::to_string)))
 }
 
 pub fn find_meta_dir() -> Option<PathBuf> {
@@ -232,8 +225,8 @@ pub fn lookup_project<'a>(
         let valid: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
         anyhow::anyhow!(
             "Unknown repo alias: '{}'. Valid aliases: {}",
-            alias,
-            valid.join(", ")
+            escape(alias),
+            escape(&valid.join(", "))
         )
     })
 }
@@ -260,13 +253,13 @@ pub fn lookup_nested_project(
             let mut valid_paths: Vec<_> = project_map.keys().collect();
             valid_paths.sort();
             anyhow::anyhow!(
-                "Unknown nested repo: '{}'. Valid nested paths:\n  {}",
-                alias,
+                "Unknown nested repo: '{}'. Valid nested paths: {}",
+                escape(alias),
                 valid_paths
                     .into_iter()
-                    .cloned()
+                    .map(|path| escape(path))
                     .collect::<Vec<_>>()
-                    .join("\n  ")
+                    .join(", ")
             )
         })
     } else {
@@ -315,9 +308,12 @@ pub fn parse_duration(s: &str) -> Result<u64> {
         };
         (num_str, multiplier)
     };
-    let num: u64 = num_str
-        .parse()
-        .with_context(|| format!("Invalid duration number: '{num_str}'"))?;
+    let num: u64 = num_str.parse().with_context(|| {
+        format!(
+            "Invalid duration '{}': use a number with an optional s, m, h, d or w suffix",
+            escape(s)
+        )
+    })?;
 
     num.checked_mul(multiplier)
         .filter(|secs| i64::try_from(*secs).is_ok())
@@ -511,6 +507,48 @@ mod tests {
     fn validate_name_rejects_spaces() {
         let err = validate_worktree_name("my feature").unwrap_err();
         assert!(err.to_string().contains("only ASCII alphanumeric"));
+    }
+
+    /// A user-given name in an error is shown escaped, so the error stays
+    /// one line with no control characters.
+    fn assert_escaped(err: anyhow::Error) {
+        let err = err.to_string();
+        assert!(!err.contains('\n') && !err.contains('\x1b'), "{err:?}");
+    }
+
+    #[test]
+    fn errors_escape_the_names_they_show() {
+        for name in [
+            "bad\nFORGED",
+            ".bad\nFORGED",
+            "a/\x1b]0;x\x07",
+            "bad\x1b[2J",
+        ] {
+            assert_escaped(validate_worktree_name(name).unwrap_err());
+        }
+
+        let projects = [meta_core::config::ProjectInfo {
+            name: "odd\x1b[2J".to_string(),
+            path: "odd".to_string(),
+            repo: None,
+            tags: vec![],
+            provides: vec![],
+            depends_on: vec![],
+            meta: false,
+        }];
+        let err = lookup_project(&projects, "a\nFORGED").unwrap_err();
+        assert!(err.to_string().contains("'a\\nFORGED'"), "{err}");
+        assert_escaped(err);
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".meta"),
+            r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
+        )
+        .unwrap();
+        for alias in ["a\nFORGED", "vendor/\nFORGED", "vendor/\x1b[2J"] {
+            assert_escaped(lookup_nested_project(tmp.path(), alias).unwrap_err());
+        }
     }
 
     // ── parse_duration ──────────────────────────────────────

@@ -21,8 +21,12 @@ pub fn fire_worktree_hook(hook_name: &str, payload: &serde_json::Value, meta_dir
     };
 
     let config = match read_meta_config_value(dir) {
-        Some(c) => c,
-        None => return,
+        Ok(Some(c)) => c,
+        Ok(None) => return,
+        Err(e) => {
+            log::warn!("Hook '{hook_name}' not run: {e:#}");
+            return;
+        }
     };
 
     let hook_cmd = config
