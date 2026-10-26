@@ -244,11 +244,21 @@ fn add_member(
         }
     };
     if let Some(other) = record.as_ref().filter(|r| r.set != set) {
-        check.blockers.push(format!(
-            "{}: meta created it for another worktree set, {}; remove that one first",
-            escape_path(path),
-            escape_path(&other.set)
-        ));
+        check
+            .blockers
+            .push(if other.set.symlink_metadata().is_ok() {
+                format!(
+                    "{}: meta created it for another worktree set, {}; remove that one first",
+                    escape_path(path),
+                    escape_path(&other.set)
+                )
+            } else {
+                format!(
+                "{}: meta created it for a worktree set at {}, which is gone; was the set moved?",
+                escape_path(path),
+                escape_path(&other.set)
+            )
+            });
     }
     // git refuses to remove a locked worktree, which would stop a removal
     // halfway
@@ -340,7 +350,7 @@ pub fn linked_worktree_admin_dir(checkout: &Path) -> Result<PathBuf> {
 /// repository's git directory, requiring the linked-worktree layout: an
 /// admin directory with a `commondir` and a `gitdir` that points back at
 /// this checkout. A `--separate-git-dir` checkout or a submodule fails this.
-pub fn linked_worktree_dirs(checkout: &Path) -> Result<(PathBuf, PathBuf)> {
+fn linked_worktree_dirs(checkout: &Path) -> Result<(PathBuf, PathBuf)> {
     let git_file = checkout.join(".git");
     let content = std::fs::read_to_string(&git_file).context("cannot read .git")?;
     let admin = content

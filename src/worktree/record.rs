@@ -75,9 +75,28 @@ pub fn read(admin: &Path) -> Result<Option<SetRecord>> {
         .with_context(|| format!("Cannot parse {}", escape_path(&path)))
 }
 
-/// Record `record` in a worktree's admin directory.
+/// Record `record` in a worktree's admin directory, atomically (a temp file
+/// renamed into place). The directory is git's: it must exist, and it
+/// carries the repository's permissions, not those of meta's data dir.
 pub fn write(admin: &Path, record: &SetRecord) -> Result<()> {
-    meta_core::store::write_atomic(&admin.join(RECORD_FILE), record)
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let path = admin.join(RECORD_FILE);
+    let tmp = admin.join(format!(
+        "{RECORD_FILE}.tmp.{}.{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let json = serde_json::to_string_pretty(record)?;
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, json.as_bytes()))
+        .and_then(|()| std::fs::rename(&tmp, &path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.with_context(|| format!("Cannot write {}", escape_path(&path)))
 }
 
 /// Delete the record in a worktree's admin directory, if any.
@@ -89,6 +108,19 @@ pub fn delete(admin: &Path) -> Result<()> {
         }
         _ => Ok(()),
     }
+}
+
+/// Whether the checkout of the worktree whose admin directory is `admin`
+/// is gone (git calls such a worktree prunable). Anything that can't be
+/// read counts as still there.
+pub fn checkout_gone(admin: &Path) -> bool {
+    let Ok(gitdir) = std::fs::read_to_string(admin.join("gitdir")) else {
+        return false;
+    };
+    matches!(
+        admin.join(gitdir.trim()).symlink_metadata(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    )
 }
 
 /// Meta's record of creating the set at `set`, from the first of its
@@ -197,6 +229,14 @@ mod tests {
         delete(&admin).unwrap();
         assert_eq!(read(&admin).unwrap(), None);
         assert!(in_repo(temp.path()).is_empty());
+    }
+
+    #[test]
+    fn write_needs_the_admin_dir_to_exist() {
+        let temp = tempfile::tempdir().unwrap();
+        let admin = temp.path().join("gone");
+        assert!(write(&admin, &record("", None)).is_err());
+        assert!(!admin.exists());
     }
 
     #[test]
