@@ -96,10 +96,7 @@ pub fn read_worktrees_dir_from_config(meta_dir: &Path) -> Result<Option<String>>
 
 pub fn find_meta_dir() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    meta_core::config::find_meta_config(&cwd, None)
-        .ok()
-        .flatten()
-        .map(|(path, _)| path.parent().unwrap_or(Path::new(".")).to_path_buf())
+    meta_core::config::nearest_meta_dir(&cwd).ok().flatten()
 }
 
 /// Like `find_meta_dir()` but returns an error if not found.
