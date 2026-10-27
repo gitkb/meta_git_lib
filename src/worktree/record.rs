@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// The record's file name inside a worktree's admin directory.
-pub const RECORD_FILE: &str = "meta-worktree.json";
+pub const RECORD_FILE: &str = meta_core::config::WORKTREE_RECORD_FILE;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetRecord {
