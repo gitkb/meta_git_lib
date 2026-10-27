@@ -264,6 +264,19 @@ pub fn place_in_set(meta_dir: &Path, alias: &str, source: &Path) -> String {
         .unwrap_or_else(|| alias.to_string())
 }
 
+/// Where the repo placed at `place` is checked out in the set at `wt_dir`:
+/// there, or where a link a checkout already put there leads, as in the
+/// workspace. Refused when a link leads outside the set.
+pub fn dest_in_set(wt_dir: &Path, place: &str) -> Result<PathBuf, String> {
+    let resolved = meta_core::config::resolve_inside(wt_dir, place)?;
+    let plain = wt_dir.canonicalize().map(|dir| dir.join(place)).ok();
+    Ok(if plain.as_ref() == Some(&resolved) {
+        wt_dir.join(place)
+    } else {
+        resolved
+    })
+}
+
 /// Look up a project by alias, supporting nested paths like "vendor/tree-sitter-markdown".
 ///
 /// For simple aliases (no `/`), uses flat lookup from the current .meta.
