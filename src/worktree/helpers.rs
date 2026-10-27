@@ -304,7 +304,8 @@ pub fn parse_duration(s: &str) -> Result<u64> {
             "d" => 86400,
             "w" => 604800,
             _ => anyhow::bail!(
-                "Invalid duration suffix '{suffix}'. Use s (seconds), m (minutes), h (hours), d (days), or w (weeks)"
+                "Invalid duration suffix '{}'. Use s (seconds), m (minutes), h (hours), d (days), or w (weeks)",
+                escape(suffix)
             ),
         };
         (num_str, multiplier)
@@ -318,7 +319,7 @@ pub fn parse_duration(s: &str) -> Result<u64> {
 
     num.checked_mul(multiplier)
         .filter(|secs| i64::try_from(*secs).is_ok())
-        .ok_or_else(|| anyhow::anyhow!("Duration '{s}' is too large"))
+        .ok_or_else(|| anyhow::anyhow!("Duration '{}' is too large", escape(s)))
 }
 
 /// Format seconds into a human-friendly duration string.
@@ -351,13 +352,19 @@ pub fn resolve_from_pr(from_pr: &str) -> Result<(String, u32, String)> {
 
     // Parse format: owner/repo#N
     let hash_pos = from_pr.rfind('#').ok_or_else(|| {
-        anyhow::anyhow!("Invalid --from-pr format: '{from_pr}'. Expected: owner/repo#N")
+        anyhow::anyhow!(
+            "Invalid --from-pr format: '{}'. Expected: owner/repo#N",
+            escape(from_pr)
+        )
     })?;
 
     let repo_spec = &from_pr[..hash_pos];
     // Validate repo spec format: must be owner/repo
     if !repo_spec.contains('/') || repo_spec.starts_with('/') || repo_spec.ends_with('/') {
-        anyhow::bail!("Invalid repo spec '{repo_spec}' in --from-pr. Expected: owner/repo#N");
+        anyhow::bail!(
+            "Invalid repo spec '{}' in --from-pr. Expected: owner/repo#N",
+            escape(repo_spec)
+        );
     }
     let pr_num: u32 = from_pr[hash_pos + 1..]
         .parse()

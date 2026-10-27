@@ -352,7 +352,7 @@ pub fn git_rev_parse(repo_path: &Path, rev: &str) -> Result<Option<String>> {
 /// can't read is an error, not "free".
 pub fn git_branch_is_free(repo_path: &Path, branch: &str) -> Result<()> {
     let full = format!("refs/heads/{branch}");
-    let in_use = |by: &str| anyhow::anyhow!("'{branch}' is {by}");
+    let in_use = |by: &str| anyhow::anyhow!("'{}' is {by}", escape(branch));
 
     // A symbolic branch would carry a ref transaction to the branch it points
     // at, which this check never looked at.
@@ -363,8 +363,9 @@ pub fn git_branch_is_free(repo_path: &Path, branch: &str) -> Result<()> {
         Some(1) => {}
         Some(0) => return Err(in_use("a symbolic ref; meta only moves plain branches")),
         _ => anyhow::bail!(
-            "Cannot inspect '{branch}': {}",
-            String::from_utf8_lossy(&symbolic.stderr).trim()
+            "Cannot inspect '{}': {}",
+            escape(branch),
+            escape(String::from_utf8_lossy(&symbolic.stderr).trim())
         ),
     }
 
@@ -453,7 +454,7 @@ pub fn git_branch_is_free(repo_path: &Path, branch: &str) -> Result<()> {
 /// through git's ref transaction.
 pub fn git_delete_branch_at(repo_path: &Path, branch: &str, expected: &str) -> Result<()> {
     git_branch_is_free(repo_path, branch)
-        .map_err(|e| anyhow::anyhow!("Branch '{branch}' is in use; kept ({e})"))?;
+        .map_err(|e| anyhow::anyhow!("Branch '{}' is in use; kept ({e})", escape(branch)))?;
     let output = git_command(repo_path)
         .args([
             "update-ref",
@@ -466,8 +467,9 @@ pub fn git_delete_branch_at(repo_path: &Path, branch: &str, expected: &str) -> R
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
-            "Branch '{branch}' no longer points where it was created; kept ({})",
-            stderr.trim()
+            "Branch '{}' no longer points where it was created; kept ({})",
+            escape(branch),
+            escape(stderr.trim())
         );
     }
     // Upstream settings of a deleted branch; there may be none.

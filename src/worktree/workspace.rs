@@ -15,14 +15,16 @@ use super::safety::{relative_label, RemovalCheck};
 /// A workspace's root meta directory and its repositories.
 pub struct Workspace {
     pub root: PathBuf,
-    /// Each repository (the root's own, then every one in its `.meta`
-    /// tree, nested ones included) with its git directory: where the
-    /// records of the worktrees made from it are.
-    pub repos: Vec<(PathBuf, PathBuf)>,
+    /// The git directory of each repository (the root's own, then every one
+    /// in its `.meta` tree, nested ones included): where the records of the
+    /// worktrees made from it are.
+    pub repos: Vec<PathBuf>,
     /// What couldn't be read (the project tree, a repository), with why:
     /// worktrees from there count as another workspace's.
     pub unreadable: Vec<(PathBuf, anyhow::Error)>,
     git_dirs: HashSet<PathBuf>,
+    /// `root`, resolved, to compare other workspaces' roots with.
+    canonical_root: PathBuf,
 }
 
 impl Workspace {
@@ -42,16 +44,17 @@ impl Workspace {
         let mut repos = Vec::new();
         for path in paths {
             match repo_git_dir(&path) {
-                Ok(Some(git_dir)) => repos.push((path, git_dir)),
+                Ok(Some(git_dir)) => repos.push(git_dir),
                 Ok(None) => {}
                 Err(e) => unreadable.push((path, e)),
             }
         }
         let git_dirs = repos
             .iter()
-            .filter_map(|(_, git_dir)| git_dir.canonicalize().ok())
+            .filter_map(|git_dir| git_dir.canonicalize().ok())
             .collect();
         Workspace {
+            canonical_root: root.canonicalize().unwrap_or_else(|_| root.clone()),
             root,
             repos,
             unreadable,
@@ -73,11 +76,8 @@ impl Workspace {
     /// doesn't say whose a set is. A project that is gone leaves only the
     /// repository to go by (prune treats such a set as orphaned).
     pub fn made_here(&self, project: &Path) -> bool {
-        let root = |dir: &Path| {
-            let root = meta_core::config::workspace_root(dir);
-            root.canonicalize().unwrap_or(root)
-        };
-        !project.exists() || root(project) == root(&self.root)
+        let root = meta_core::config::workspace_root(project);
+        !project.exists() || root.canonicalize().unwrap_or(root) == self.canonical_root
     }
 
     /// The worktrees of the set at `wt_dir` (checked as `check`) that come
