@@ -241,9 +241,17 @@ pub fn lookup_project<'a>(
 /// references between repos, such as Cargo workspace members, hold). The
 /// alias stands in for a source outside the meta dir.
 pub fn place_in_set(meta_dir: &Path, alias: &str, source: &Path) -> String {
+    // The configured path, as written (a link inside the workspace stays the
+    // link); resolved only when the two are spelled differently
     let resolve = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    resolve(source)
-        .strip_prefix(resolve(meta_dir))
+    source
+        .strip_prefix(meta_dir)
+        .map(Path::to_path_buf)
+        .or_else(|_| {
+            resolve(source)
+                .strip_prefix(resolve(meta_dir))
+                .map(Path::to_path_buf)
+        })
         .ok()
         .filter(|place| !place.as_os_str().is_empty())
         .map(|place| {
