@@ -73,11 +73,11 @@ impl Workspace {
     /// Whether `project`, the meta directory a record names, is in this
     /// workspace. Two workspaces can share a repository (one checked out
     /// with `git worktree add` from the other), so the repository alone
-    /// doesn't say whose a set is. A project that is gone leaves only the
-    /// repository to go by (prune treats such a set as orphaned).
+    /// doesn't say whose a set is. A project that is gone (or moved) leaves
+    /// its sets of unknown ownership: not this workspace's.
     pub fn made_here(&self, project: &Path) -> bool {
         let root = meta_core::config::workspace_root(project);
-        !project.exists() || root.canonicalize().unwrap_or(root) == self.canonical_root
+        project.exists() && root.canonicalize().unwrap_or(root) == self.canonical_root
     }
 
     /// The worktrees of the set at `wt_dir` (checked as `check`) that come

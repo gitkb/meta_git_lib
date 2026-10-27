@@ -106,9 +106,9 @@ pub fn git_worktree_add(
             anyhow::bail!(
                 "git worktree add failed for '{}' (branch: {}, ref: {}): {}",
                 escape_path(repo_path),
-                branch,
-                ref_name,
-                stderr.trim()
+                escape(branch),
+                escape(ref_name),
+                escape(stderr.trim())
             );
         }
         return Ok(Some(start)); // Always creates a new branch from ref
@@ -155,8 +155,8 @@ pub fn git_worktree_add(
         anyhow::bail!(
             "git worktree add failed for '{}' (branch: {}): {}",
             escape_path(repo_path),
-            branch,
-            stderr.trim()
+            escape(branch),
+            escape(stderr.trim())
         );
     }
 
@@ -337,9 +337,10 @@ pub fn git_rev_parse(repo_path: &Path, rev: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     anyhow::bail!(
-        "git rev-parse {rev} failed in {}: {}",
+        "git rev-parse {} failed in {}: {}",
+        escape(rev),
         escape_path(repo_path),
-        stderr.trim()
+        escape(stderr.trim())
     )
 }
 

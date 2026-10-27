@@ -32,8 +32,10 @@ pub fn resolve_worktree_root(meta_dir: Option<&Path>) -> Result<PathBuf> {
     if let Ok(env_path) = std::env::var("META_WORKTREES") {
         return Ok(PathBuf::from(env_path));
     }
-    // 2. Check worktrees_dir in .meta config
-    if let Some(dir) = meta_dir {
+    // 2. Check worktrees_dir in .meta config. In a worktree set, of the
+    // checkout it stands for: its sets live where that one's do
+    let source = meta_dir.and_then(meta_core::config::set_source);
+    if let Some(dir) = source.as_deref().filter(|s| s.is_dir()).or(meta_dir) {
         // The config's rules for the worktree directory (inside the
         // workspace, not inside a project, not into .git) hold here too,
         // whoever ran this plugin
@@ -149,6 +151,7 @@ pub fn resolve_worktree_context(name: &str) -> Result<WorktreeContext> {
 
 /// Resolve worktree context and verify the worktree exists.
 pub fn resolve_existing_worktree(name: &str) -> Result<WorktreeContext> {
+    validate_worktree_name(name)?;
     let ctx = resolve_worktree_context(name)?;
     if !ctx.wt_dir.exists() {
         anyhow::bail!(
@@ -368,7 +371,7 @@ pub fn resolve_from_pr(from_pr: &str) -> Result<(String, u32, String)> {
     }
     let pr_num: u32 = from_pr[hash_pos + 1..]
         .parse()
-        .with_context(|| format!("Invalid PR number in '{from_pr}'"))?;
+        .with_context(|| format!("Invalid PR number in '{}'", escape(from_pr)))?;
 
     // Resolve head branch via gh CLI
     let output = Command::new("gh")
@@ -391,14 +394,17 @@ pub fn resolve_from_pr(from_pr: &str) -> Result<(String, u32, String)> {
         anyhow::bail!(
             "Failed to resolve PR #{} in {}: {}",
             pr_num,
-            repo_spec,
-            stderr.trim()
+            escape(repo_spec),
+            escape(stderr.trim())
         );
     }
 
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if branch.is_empty() {
-        anyhow::bail!("Empty head branch for PR #{pr_num} in {repo_spec}");
+        anyhow::bail!(
+            "Empty head branch for PR #{pr_num} in {}",
+            escape(repo_spec)
+        );
     }
 
     Ok((repo_spec.to_string(), pr_num, branch))
@@ -522,6 +528,17 @@ mod tests {
     fn assert_escaped(err: anyhow::Error) {
         let err = err.to_string();
         assert!(!err.contains('\n') && !err.contains('\x1b'), "{err:?}");
+    }
+
+    #[test]
+    fn from_pr_errors_escape_the_spec() {
+        for spec in ["o/r#1\u{1b}[2J\nFORGED", "bad\u{1b}[2J\nFORGED"] {
+            let message = format!("{:#}", resolve_from_pr(spec).unwrap_err());
+            assert!(
+                !message.contains('\n') && !message.contains('\u{1b}'),
+                "{message}"
+            );
+        }
     }
 
     #[test]
