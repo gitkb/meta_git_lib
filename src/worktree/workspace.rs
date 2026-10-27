@@ -72,7 +72,7 @@ impl Workspace {
     /// with `git worktree add` from the other), so the repository alone
     /// doesn't say whose a set is. A project that is gone leaves only the
     /// repository to go by (prune treats such a set as orphaned).
-    fn made_here(&self, project: &Path) -> bool {
+    pub fn made_here(&self, project: &Path) -> bool {
         let root = |dir: &Path| {
             let root = meta_core::config::workspace_root(dir);
             root.canonicalize().unwrap_or(root)
