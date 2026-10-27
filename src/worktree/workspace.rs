@@ -67,19 +67,42 @@ impl Workspace {
             .is_ok_and(|git_dir| self.git_dirs.contains(&git_dir))
     }
 
+    /// Whether `project`, the meta directory a record names, is in this
+    /// workspace. Two workspaces can share a repository (one checked out
+    /// with `git worktree add` from the other), so the repository alone
+    /// doesn't say whose a set is. A project that is gone leaves only the
+    /// repository to go by (prune treats such a set as orphaned).
+    fn made_here(&self, project: &Path) -> bool {
+        let root = |dir: &Path| {
+            let root = meta_core::config::workspace_root(dir);
+            root.canonicalize().unwrap_or(root)
+        };
+        !project.exists() || root(project) == root(&self.root)
+    }
+
     /// The worktrees of the set at `wt_dir` (checked as `check`) that come
-    /// from repositories outside this workspace, each with the workspace
-    /// its record names. A set with any is another workspace's.
+    /// from repositories outside this workspace, or that another workspace
+    /// made, each with the workspace its record names. A set with any is
+    /// another workspace's.
     pub fn foreign_members(&self, wt_dir: &Path, check: &RemovalCheck) -> Vec<String> {
         check
             .members
             .iter()
-            .filter(|m| !self.holds(&m.repo_git_dir))
+            .filter(|m| {
+                !self.holds(&m.repo_git_dir)
+                    || m.record
+                        .as_ref()
+                        .is_some_and(|r| !self.made_here(&r.project))
+            })
             .map(|m| {
                 let label = relative_label(wt_dir, &m.path);
                 let repo = m.repo_git_dir.canonicalize();
                 let repo = escape_path(repo.as_deref().unwrap_or(&m.repo_git_dir));
                 match &m.record {
+                    Some(record) if self.holds(&m.repo_git_dir) => format!(
+                        "{label}: the workspace at {} made it",
+                        escape_path(&record.project)
+                    ),
                     Some(record) => format!(
                         "{label}: its repository {repo} is not one of this workspace's; its \
                          record names the workspace at {}",
