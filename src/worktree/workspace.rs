@@ -99,6 +99,11 @@ impl Workspace {
                 let repo = m.repo_git_dir.canonicalize();
                 let repo = escape_path(repo.as_deref().unwrap_or(&m.repo_git_dir));
                 match &m.record {
+                    Some(record) if !record.project.exists() => format!(
+                        "{label}: the workspace at {} made it, and it is gone or was moved; \
+                         remove this worktree with 'git worktree remove'",
+                        escape_path(&record.project)
+                    ),
                     Some(record) if self.holds(&m.repo_git_dir) => format!(
                         "{label}: the workspace at {} made it",
                         escape_path(&record.project)

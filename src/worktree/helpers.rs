@@ -235,6 +235,26 @@ pub fn lookup_project<'a>(
     })
 }
 
+/// Where the repo at `source`, found from `meta_dir` under `alias`, goes in
+/// a worktree set: its path from the meta dir, so a set lays its repos out
+/// as the workspace does (its copied config stays right, and relative
+/// references between repos, such as Cargo workspace members, hold). The
+/// alias stands in for a source outside the meta dir.
+pub fn place_in_set(meta_dir: &Path, alias: &str, source: &Path) -> String {
+    source
+        .strip_prefix(meta_dir)
+        .ok()
+        .filter(|place| !place.as_os_str().is_empty())
+        .map(|place| {
+            place
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .unwrap_or_else(|| alias.to_string())
+}
+
 /// Look up a project by alias, supporting nested paths like "vendor/tree-sitter-markdown".
 ///
 /// For simple aliases (no `/`), uses flat lookup from the current .meta.
