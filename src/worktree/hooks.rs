@@ -21,8 +21,15 @@ pub fn fire_worktree_hook(hook_name: &str, payload: &serde_json::Value, meta_dir
     };
 
     let config = match read_meta_config_value(dir) {
-        Some(c) => c,
-        None => return,
+        Ok(Some(c)) => c,
+        Ok(None) => return,
+        Err(e) => {
+            log::warn!(
+                "Hook '{hook_name}' not run: {}",
+                meta_core::display::escape_lines(&format!("{e:#}"))
+            );
+            return;
+        }
     };
 
     let hook_cmd = config
@@ -41,8 +48,11 @@ pub fn fire_worktree_hook(hook_name: &str, payload: &serde_json::Value, meta_dir
         Err(_) => return,
     };
 
+    // From the directory whose config names the hook: a set removed from
+    // inside it takes the caller's directory with it
     let result = Command::new("sh")
         .args(["-c", cmd_str])
+        .current_dir(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())

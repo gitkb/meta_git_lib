@@ -37,6 +37,12 @@ pub struct RemovalCheck {
     /// as a proof of ownership; a create rolling back the set it just
     /// claimed needs no such proof.
     pub unusable_records: Vec<String>,
+    /// Worktrees without a record in a set whose other worktrees have one
+    /// (part of `blockers`): meta didn't make them, so it doesn't delete
+    /// them. A create rolling back may not have recorded every worktree yet.
+    pub missing_records: Vec<String>,
+    /// The members whose record can't be used.
+    unusable_members: Vec<PathBuf>,
     /// Each checkout's complete git status, stranded commit ids, and the size
     /// and modification time of every file `unsaved` lists, so a re-check
     /// sees changes the abbreviated lines would hide, rewrites included.
@@ -64,8 +70,9 @@ impl RemovalCheck {
 /// as unsaved: uncommitted or untracked changes, commits that no branch, tag
 /// or remote ref holds, and files that no repository holds. Ignored files count as disposable, as
 /// they do for `git worktree remove`. Blocks on a worktree whose record
-/// (see [`record`]) names another set, such as a set nested in this one, or
-/// whose record can't be read.
+/// (see [`record`]) names another set, such as a set nested in this one,
+/// whose record can't be read, or that has no record while another worktree
+/// of the set has one.
 pub fn check_worktree_removal(wt_dir: &Path) -> Result<RemovalCheck> {
     let mut check = RemovalCheck::default();
     if wt_dir.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
@@ -95,7 +102,6 @@ pub fn check_worktree_removal(wt_dir: &Path) -> Result<RemovalCheck> {
     scan(&set, wt_dir, root_owned, &mut loose, &mut check)?;
     // A stable order, so two checks of an unchanged set compare equal.
     check.members.sort_by(|a, b| a.path.cmp(&b.path));
-    check.blockers.sort();
     loose.sort();
 
     // Another set's records are blockers already
@@ -110,7 +116,22 @@ pub fn check_worktree_removal(wt_dir: &Path) -> Result<RemovalCheck> {
                 escape_path(wt_dir)
             ));
         }
+        let missing: Vec<String> = check
+            .members
+            .iter()
+            .filter(|m| m.record.is_none() && !check.unusable_members.contains(&m.path))
+            .map(|m| {
+                format!(
+                    "{}: meta has no record of creating it (made by hand, or its record was \
+                     deleted); run 'git worktree remove' on it first",
+                    relative_label(wt_dir, &m.path)
+                )
+            })
+            .collect();
+        check.blockers.extend(missing.iter().cloned());
+        check.missing_records = missing;
     }
+    check.blockers.sort();
 
     let paths: Vec<PathBuf> = check.members.iter().map(|m| m.path.clone()).collect();
     for member in &paths {
@@ -246,6 +267,7 @@ fn add_member(
             );
             check.unusable_records.push(why.clone());
             check.blockers.push(why);
+            check.unusable_members.push(path.to_path_buf());
             None
         }
     };
@@ -446,7 +468,7 @@ fn unsaved_work(repo: &Path, members: &[PathBuf]) -> Result<(Vec<String>, String
     anyhow::ensure!(
         output.status.success(),
         "git status failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
+        escape(String::from_utf8_lossy(&output.stderr).trim())
     );
     // Exact, for the re-check: raw bytes, not a lossy decoding.
     let text = format!("{:?}", output.stdout);
@@ -510,7 +532,7 @@ fn unsaved_work(repo: &Path, members: &[PathBuf]) -> Result<(Vec<String>, String
     anyhow::ensure!(
         output.status.success(),
         "git rev-list failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
+        escape(String::from_utf8_lossy(&output.stderr).trim())
     );
     let commits = String::from_utf8_lossy(&output.stdout).into_owned();
     let stranded = commits.lines().count();
@@ -528,7 +550,7 @@ fn unsaved_work(repo: &Path, members: &[PathBuf]) -> Result<(Vec<String>, String
     anyhow::ensure!(
         staged.status.success(),
         "git diff --cached failed: {}",
-        String::from_utf8_lossy(&staged.stderr).trim()
+        escape(String::from_utf8_lossy(&staged.stderr).trim())
     );
     let staged = String::from_utf8_lossy(&staged.stdout).into_owned();
     let files: Vec<String> = modified
@@ -559,7 +581,7 @@ fn hidden_files(repo: &Path) -> Result<Vec<(String, PathBuf)>> {
     anyhow::ensure!(
         output.status.success(),
         "git ls-files failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
+        escape(String::from_utf8_lossy(&output.stderr).trim())
     );
     // Entries are "<tag> <path>"; a lowercase tag means assume-unchanged,
     // "S" skip-worktree.
@@ -607,7 +629,7 @@ fn operation_in_progress(repo: &Path) -> Result<Option<&'static str>> {
     anyhow::ensure!(
         output.status.success(),
         "git rev-parse --git-dir failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
+        escape(String::from_utf8_lossy(&output.stderr).trim())
     );
     let git_dir = repo.join(String::from_utf8_lossy(&output.stdout).trim_end_matches(['\n', '\r']));
     let markers = [
@@ -625,7 +647,7 @@ fn operation_in_progress(repo: &Path) -> Result<Option<&'static str>> {
         .map(|(_, name)| name))
 }
 
-fn relative_label(root: &Path, path: &Path) -> String {
+pub(super) fn relative_label(root: &Path, path: &Path) -> String {
     match path.strip_prefix(root) {
         Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
         Ok(rel) => escape_path(rel).to_string(),
@@ -738,6 +760,12 @@ mod tests {
 
         let record = set_record(&set);
         mark(&set, &record);
+        // In a set meta made, a worktree without a record is not meta's
+        let check = check_worktree_removal(&set).unwrap();
+        assert_eq!(check.missing_records.len(), 1, "{check:?}");
+        assert!(check.missing_records[0].starts_with("leaf: meta has no record"));
+        assert_eq!(check.blockers, check.missing_records);
+        mark(&set.join("leaf"), &record);
         let check = check_worktree_removal(&set).unwrap();
         assert!(check.is_clear(), "{check:?}");
         assert_eq!(check.record(), Some(&record));

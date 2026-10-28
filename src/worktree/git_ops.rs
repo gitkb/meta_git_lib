@@ -68,7 +68,7 @@ fn ensure_checkout_config_is_not_bare(repo_path: &Path) -> Result<()> {
         anyhow::bail!(
             "Failed to inspect core.bare for '{}': {}",
             escape_path(repo_path),
-            stderr.trim()
+            escape(stderr.trim())
         );
     }
 
@@ -106,9 +106,9 @@ pub fn git_worktree_add(
             anyhow::bail!(
                 "git worktree add failed for '{}' (branch: {}, ref: {}): {}",
                 escape_path(repo_path),
-                branch,
-                ref_name,
-                stderr.trim()
+                escape(branch),
+                escape(ref_name),
+                escape(stderr.trim())
             );
         }
         return Ok(Some(start)); // Always creates a new branch from ref
@@ -155,8 +155,8 @@ pub fn git_worktree_add(
         anyhow::bail!(
             "git worktree add failed for '{}' (branch: {}): {}",
             escape_path(repo_path),
-            branch,
-            stderr.trim()
+            escape(branch),
+            escape(stderr.trim())
         );
     }
 
@@ -177,7 +177,7 @@ pub fn git_worktree_remove(repo_path: &Path, worktree_path: &Path, force: bool) 
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git worktree remove failed: {}", stderr.trim());
+        anyhow::bail!("git worktree remove failed: {}", escape(stderr.trim()));
     }
     Ok(())
 }
@@ -194,7 +194,7 @@ pub fn git_status_summary(repo_path: &Path) -> Result<GitStatusSummary> {
         anyhow::bail!(
             "git status failed for '{}': {}",
             escape_path(repo_path),
-            stderr.trim()
+            escape(stderr.trim())
         );
     }
 
@@ -337,9 +337,10 @@ pub fn git_rev_parse(repo_path: &Path, rev: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     anyhow::bail!(
-        "git rev-parse {rev} failed in {}: {}",
+        "git rev-parse {} failed in {}: {}",
+        escape(rev),
         escape_path(repo_path),
-        stderr.trim()
+        escape(stderr.trim())
     )
 }
 
@@ -352,7 +353,7 @@ pub fn git_rev_parse(repo_path: &Path, rev: &str) -> Result<Option<String>> {
 /// can't read is an error, not "free".
 pub fn git_branch_is_free(repo_path: &Path, branch: &str) -> Result<()> {
     let full = format!("refs/heads/{branch}");
-    let in_use = |by: &str| anyhow::anyhow!("'{branch}' is {by}");
+    let in_use = |by: &str| anyhow::anyhow!("'{}' is {by}", escape(branch));
 
     // A symbolic branch would carry a ref transaction to the branch it points
     // at, which this check never looked at.
@@ -363,8 +364,9 @@ pub fn git_branch_is_free(repo_path: &Path, branch: &str) -> Result<()> {
         Some(1) => {}
         Some(0) => return Err(in_use("a symbolic ref; meta only moves plain branches")),
         _ => anyhow::bail!(
-            "Cannot inspect '{branch}': {}",
-            String::from_utf8_lossy(&symbolic.stderr).trim()
+            "Cannot inspect '{}': {}",
+            escape(branch),
+            escape(String::from_utf8_lossy(&symbolic.stderr).trim())
         ),
     }
 
@@ -375,7 +377,7 @@ pub fn git_branch_is_free(repo_path: &Path, branch: &str) -> Result<()> {
         list.status.success(),
         "Cannot list the worktrees of {}: {}",
         escape_path(repo_path),
-        String::from_utf8_lossy(&list.stderr).trim()
+        escape(String::from_utf8_lossy(&list.stderr).trim())
     );
     let wanted = format!("branch {full}");
     if String::from_utf8_lossy(&list.stdout)
@@ -392,7 +394,7 @@ pub fn git_branch_is_free(repo_path: &Path, branch: &str) -> Result<()> {
         output.status.success(),
         "Cannot find the git directory of {}: {}",
         escape_path(repo_path),
-        String::from_utf8_lossy(&output.stderr).trim()
+        escape(String::from_utf8_lossy(&output.stderr).trim())
     );
     // Relative output is relative to the repository, where git ran.
     let common =
@@ -453,7 +455,7 @@ pub fn git_branch_is_free(repo_path: &Path, branch: &str) -> Result<()> {
 /// through git's ref transaction.
 pub fn git_delete_branch_at(repo_path: &Path, branch: &str, expected: &str) -> Result<()> {
     git_branch_is_free(repo_path, branch)
-        .map_err(|e| anyhow::anyhow!("Branch '{branch}' is in use; kept ({e})"))?;
+        .map_err(|e| anyhow::anyhow!("Branch '{}' is in use; kept ({e})", escape(branch)))?;
     let output = git_command(repo_path)
         .args([
             "update-ref",
@@ -466,8 +468,9 @@ pub fn git_delete_branch_at(repo_path: &Path, branch: &str, expected: &str) -> R
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
-            "Branch '{branch}' no longer points where it was created; kept ({})",
-            stderr.trim()
+            "Branch '{}' no longer points where it was created; kept ({})",
+            escape(branch),
+            escape(stderr.trim())
         );
     }
     // Upstream settings of a deleted branch; there may be none.
@@ -486,7 +489,11 @@ pub fn git_fetch_branch(repo_path: &Path, branch: &str) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to fetch branch '{}': {}", branch, stderr.trim());
+        anyhow::bail!(
+            "Failed to fetch branch '{}': {}",
+            escape(branch),
+            escape(stderr.trim())
+        );
     }
     Ok(())
 }
@@ -495,6 +502,21 @@ pub fn git_fetch_branch(repo_path: &Path, branch: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn a_failed_fetch_is_reported_on_one_line() {
+        let tmp = init_git_repo();
+        git_command(tmp.path())
+            .args(["remote", "add", "origin", "/nonexistent/r\u{1b}[2J\nFORGED"])
+            .status()
+            .unwrap();
+        let err = git_fetch_branch(tmp.path(), "b\u{1b}[2J\nFORGED").unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            !message.contains('\n') && !message.contains('\u{1b}'),
+            "{message}"
+        );
+    }
 
     /// Create a minimal git repo in a tempdir and return the tempdir handle.
     fn init_git_repo() -> tempfile::TempDir {
