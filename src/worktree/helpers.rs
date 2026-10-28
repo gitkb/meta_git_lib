@@ -282,7 +282,7 @@ pub fn dest_in_set(wt_dir: &Path, place: &str) -> Result<PathBuf, String> {
 
 /// Look up a project by alias, supporting nested paths like "vendor/tree-sitter-markdown".
 ///
-/// For simple aliases (no `/`), uses flat lookup from the current .meta.
+/// For simple aliases (no `/`), uses flat lookup from the current .meta.yaml.
 /// For nested paths, walks the meta tree recursively to find the project.
 ///
 /// Returns the resolved path and project info.
