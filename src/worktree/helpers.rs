@@ -34,8 +34,8 @@ pub fn resolve_worktree_root(meta_dir: Option<&Path>) -> Result<PathBuf> {
     }
     // 2. Check worktrees_dir in .meta config. In a worktree set, of the
     // checkout it stands for: its sets live where that one's do
-    let source = meta_dir.and_then(meta_core::config::set_source);
-    if let Some(dir) = source.as_deref().filter(|s| s.is_dir()).or(meta_dir) {
+    if let Some(dir) = meta_dir.map(owner_dir) {
+        let dir = dir.as_path();
         // The config's rules for the worktree directory (inside the
         // workspace, not inside a project, not into .git) hold here too,
         // whoever ran this plugin
