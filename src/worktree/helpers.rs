@@ -172,7 +172,7 @@ pub fn discover_and_validate_worktree(
     let ctx = resolve_existing_worktree(name)?;
     let repos = meta_cli::worktree::discover_worktree_repos(&ctx.wt_dir)?;
     if repos.is_empty() {
-        anyhow::bail!("No repos found in worktree '{name}'");
+        anyhow::bail!("No repos found in worktree '{}'", escape(name));
     }
     Ok(repos)
 }
