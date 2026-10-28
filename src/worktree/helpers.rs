@@ -235,6 +235,14 @@ pub fn lookup_project<'a>(
     })
 }
 
+/// The meta directory whose sets and settings (such as hooks) `meta_dir`'s
+/// are: inside a set, the checkout the set stands for, which outlives it.
+pub fn owner_dir(meta_dir: &Path) -> PathBuf {
+    meta_core::config::set_source(meta_dir)
+        .filter(|source| source.is_dir())
+        .unwrap_or_else(|| meta_dir.to_path_buf())
+}
+
 /// Where the repo at `source`, found from `meta_dir` under `alias`, goes in
 /// a worktree set: its path from the meta dir, so a set lays its repos out
 /// as the workspace does (its copied config stays right, and relative
