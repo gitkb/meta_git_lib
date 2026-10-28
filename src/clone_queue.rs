@@ -82,7 +82,7 @@ impl CloneQueue {
         true
     }
 
-    /// Add multiple tasks from a .meta file
+    /// Add multiple tasks from a .meta.yaml file
     pub fn push_from_meta(&self, base_dir: &Path, depth_level: usize) -> anyhow::Result<usize> {
         // Check meta depth limit
         if let Some(max_depth) = self.meta_depth {
@@ -95,8 +95,8 @@ impl CloneQueue {
             }
         }
 
-        let Some((meta_path, _format)) = config::find_meta_config_in(base_dir)? else {
-            debug!("No .meta config found in {}", escape_path(base_dir));
+        let Some(meta_path) = config::find_meta_config_in(base_dir)? else {
+            debug!("No .meta.yaml found in {}", escape_path(base_dir));
             return Ok(0);
         };
 
@@ -178,7 +178,7 @@ impl CloneQueue {
         self.git_depth.as_deref()
     }
 
-    /// Mark a task as completed and check for nested .meta files
+    /// Mark a task as completed and check for nested .meta.yaml files
     pub fn mark_completed(&self, task: &CloneTask) -> anyhow::Result<usize> {
         self.total_completed.fetch_add(1, Ordering::SeqCst);
 
@@ -187,17 +187,17 @@ impl CloneQueue {
             completed.insert(task.target_path.clone());
         }
 
-        // Check for nested .meta file and add children to queue
+        // Check for nested .meta.yaml file and add children to queue
         let added = self.push_from_meta(&task.target_path, task.depth_level + 1)?;
         debug!(
             "mark_completed: {} -> {} nested tasks discovered",
             task.name, added
         );
 
-        // Warn if the config declared meta: true but no nested .meta was found
+        // Warn if the config declared meta: true but no nested .meta.yaml was found
         if task.is_meta && added == 0 {
             warn!(
-                "'{}' is declared with `meta: true` but no .meta config was found inside it",
+                "'{}' is declared with `meta: true` but no .meta.yaml was found inside it",
                 task.name
             );
         }
@@ -263,16 +263,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn push_from_meta_does_not_look_past_the_depth_limit() {
-        // child exists with a dangling .meta; at depth limit 0 it is never
+        // child exists with a dangling .meta.yaml; at depth limit 0 it is never
         // read, so seeding still queues the missing sibling
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("child")).unwrap();
         std::fs::write(
-            dir.path().join(".meta"),
+            dir.path().join(".meta.yaml"),
             r#"{"projects": {"child": {"repo": "u", "meta": true}, "sib": "u2"}}"#,
         )
         .unwrap();
-        std::os::unix::fs::symlink("missing.json", dir.path().join("child/.meta")).unwrap();
+        std::os::unix::fs::symlink("missing.yaml", dir.path().join("child/.meta.yaml")).unwrap();
         let queue = CloneQueue::new(None, Some(0));
         assert_eq!(queue.push_from_meta(dir.path(), 0).unwrap(), 1);
     }
@@ -280,16 +280,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn push_from_meta_fails_on_a_nested_config_it_cannot_read() {
-        // child/.meta is a link to nowhere: its repos are unknown, which is
+        // child/.meta.yaml is a link to nowhere: its repos are unknown, which is
         // an error, not "no nested repos"
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("child")).unwrap();
         std::fs::write(
-            dir.path().join(".meta"),
+            dir.path().join(".meta.yaml"),
             r#"{"projects": {"child": {"repo": "u", "meta": true}}}"#,
         )
         .unwrap();
-        std::os::unix::fs::symlink("missing.json", dir.path().join("child/.meta")).unwrap();
+        std::os::unix::fs::symlink("missing.yaml", dir.path().join("child/.meta.yaml")).unwrap();
         let queue = CloneQueue::new(None, None);
         let err = queue.push_from_meta(dir.path(), 0).unwrap_err();
         assert!(format!("{err:#}").contains("Cannot read"), "{err:#}");
@@ -388,7 +388,7 @@ mod tests {
     fn push_from_meta_discovers_projects() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join(".meta"),
+            dir.path().join(".meta.yaml"),
             r#"{"projects": {
                 "alpha": "git@github.com:org/alpha.git",
                 "beta": "git@github.com:org/beta.git"
@@ -414,7 +414,7 @@ mod tests {
     fn push_from_meta_respects_depth_limit() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join(".meta"),
+            dir.path().join(".meta.yaml"),
             r#"{"projects": {"repo": "git@github.com:org/repo.git"}}"#,
         )
         .unwrap();
@@ -435,7 +435,7 @@ mod tests {
         // Create the project directory so it appears "already cloned"
         std::fs::create_dir(dir.path().join("existing")).unwrap();
         std::fs::write(
-            dir.path().join(".meta"),
+            dir.path().join(".meta.yaml"),
             r#"{"projects": {"existing": "git@github.com:org/existing.git"}}"#,
         )
         .unwrap();
@@ -449,7 +449,7 @@ mod tests {
     fn push_from_meta_skips_projects_without_repo() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join(".meta"),
+            dir.path().join(".meta.yaml"),
             r#"{"projects": {"no-repo": {"path": "no-repo"}}}"#,
         )
         .unwrap();
@@ -463,7 +463,7 @@ mod tests {
     fn push_from_meta_preserves_is_meta_flag() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join(".meta"),
+            dir.path().join(".meta.yaml"),
             r#"{"projects": {
                 "nested": {"repo": "git@github.com:org/nested.git", "meta": true},
                 "plain": "git@github.com:org/plain.git"
@@ -490,9 +490,9 @@ mod tests {
         let child_dir = dir.path().join("child");
         std::fs::create_dir(&child_dir).unwrap();
 
-        // Child has its own .meta with a grandchild
+        // Child has its own .meta.yaml with a grandchild
         std::fs::write(
-            child_dir.join(".meta"),
+            child_dir.join(".meta.yaml"),
             r#"{"projects": {"grandchild": "git@github.com:org/grandchild.git"}}"#,
         )
         .unwrap();
@@ -516,7 +516,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let child_dir = dir.path().join("child");
         std::fs::create_dir(&child_dir).unwrap();
-        // No .meta inside child
+        // No .meta.yaml inside child
 
         let queue = CloneQueue::new(None, None);
         let task = CloneTask {

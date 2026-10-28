@@ -7,9 +7,9 @@ use std::process::{Command, Stdio};
 use super::helpers::read_meta_config_value;
 use super::types::{CreateRepoEntry, PruneEntry};
 
-/// Fire a worktree lifecycle hook if configured in `.meta`.
+/// Fire a worktree lifecycle hook if configured in `.meta.yaml`.
 ///
-/// Reads the `.meta` config for `worktree.hooks.<hook_name>`.
+/// Reads the `.meta.yaml` config for `worktree.hooks.<hook_name>`.
 /// If configured, spawns the command and pipes `payload` JSON to stdin.
 /// The hook's stderr goes to meta's stderr, as git does for its hooks; a
 /// pipe that nobody reads would block a verbose hook forever.

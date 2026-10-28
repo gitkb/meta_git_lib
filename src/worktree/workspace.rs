@@ -16,7 +16,7 @@ use super::safety::{relative_label, RemovalCheck};
 pub struct Workspace {
     pub root: PathBuf,
     /// The git directory of each repository (the root's own, then every one
-    /// in its `.meta` tree, nested ones included): where the records of the
+    /// in its `.meta.yaml` tree, nested ones included): where the records of the
     /// worktrees made from it are.
     pub repos: Vec<PathBuf>,
     /// What couldn't be read (the project tree, a repository), with why:

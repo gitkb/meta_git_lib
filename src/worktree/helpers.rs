@@ -1,7 +1,6 @@
 //! Utility functions for worktree management.
 
 use anyhow::{Context, Result};
-use meta_core::config::ConfigFormat;
 use meta_core::display::{escape, escape_path};
 use std::path::{Path, PathBuf};
 
@@ -32,14 +31,14 @@ pub fn resolve_worktree_root(meta_dir: Option<&Path>) -> Result<PathBuf> {
     if let Ok(env_path) = std::env::var("META_WORKTREES") {
         return Ok(PathBuf::from(env_path));
     }
-    // 2. Check worktrees_dir in .meta config. In a worktree set, of the
+    // 2. Check worktrees_dir in .meta.yaml. In a worktree set, of the
     // checkout it stands for: its sets live where that one's do
     if let Some(dir) = meta_dir.map(owner_dir) {
         let dir = dir.as_path();
         // The config's rules for the worktree directory (inside the
         // workspace, not inside a project, not into .git) hold here too,
         // whoever ran this plugin
-        if let Some((config, _)) = meta_core::config::find_meta_config_in(dir)? {
+        if let Some(config) = meta_core::config::find_meta_config_in(dir)? {
             meta_core::config::parse_meta_config(&config)?;
         }
         if let Some(configured) = read_worktrees_dir_from_config(dir)? {
@@ -47,7 +46,7 @@ pub fn resolve_worktree_root(meta_dir: Option<&Path>) -> Result<PathBuf> {
             // may not point it outside the workspace
             let relative = meta_core::config::relative_dir(dir, &configured).map_err(|why| {
                 anyhow::anyhow!(
-                    "Invalid worktrees_dir in the .meta of {}: {why} (use META_WORKTREES \
+                    "Invalid worktrees_dir in the .meta.yaml of {}: {why} (use META_WORKTREES \
                      for a directory elsewhere)",
                     escape_path(dir)
                 )
@@ -75,18 +74,14 @@ pub fn resolve_worktree_root(meta_dir: Option<&Path>) -> Result<PathBuf> {
 /// [`meta_core::config::find_meta_config_in`]) as a JSON value, if there is
 /// one. One that can't be read or parsed is an error.
 pub fn read_meta_config_value(meta_dir: &Path) -> Result<Option<serde_json::Value>> {
-    let Some((path, format)) = meta_core::config::find_meta_config_in(meta_dir)? else {
+    let Some(path) = meta_core::config::find_meta_config_in(meta_dir)? else {
         return Ok(None);
     };
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Cannot read {}", escape_path(&path)))?;
-    let value = match format {
-        ConfigFormat::Json => serde_json::from_str(&content).map_err(anyhow::Error::from),
-        ConfigFormat::Yaml => serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&content)
-            .map_err(anyhow::Error::from)
-            .and_then(|v| serde_json::to_value(v).map_err(anyhow::Error::from)),
-    };
-    value
+    serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&content)
+        .map_err(anyhow::Error::from)
+        .and_then(|v| serde_json::to_value(v).map_err(anyhow::Error::from))
         .map(Some)
         .with_context(|| format!("Cannot parse {}", escape_path(&path)))
 }
@@ -105,7 +100,7 @@ pub fn find_meta_dir() -> Option<PathBuf> {
 pub fn require_meta_dir() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     meta_core::config::nearest_meta_dir(&cwd)?
-        .ok_or_else(|| anyhow::anyhow!("Not inside a meta project (no .meta found)"))
+        .ok_or_else(|| anyhow::anyhow!("Not inside a meta project (no .meta.yaml found)"))
 }
 
 /// The directory of the worktree set `name` under `worktree_root`. A symlink
@@ -177,10 +172,10 @@ pub fn discover_and_validate_worktree(
     Ok(repos)
 }
 
-/// Load and parse the .meta config, returning the project list.
+/// Load and parse the .meta.yaml, returning the project list.
 pub fn load_projects(meta_dir: &Path) -> Result<Vec<meta_core::config::ProjectInfo>> {
-    let (config_path, _) = meta_core::config::find_meta_config(meta_dir, None)?
-        .ok_or_else(|| anyhow::anyhow!("No .meta config found in {}", escape_path(meta_dir)))?;
+    let config_path = meta_core::config::find_meta_config(meta_dir, None)?
+        .ok_or_else(|| anyhow::anyhow!("No .meta.yaml found in {}", escape_path(meta_dir)))?;
     let (projects, _) = meta_core::config::parse_meta_config(&config_path)?;
     Ok(projects)
 }
@@ -617,7 +612,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
-            tmp.path().join(".meta"),
+            tmp.path().join(".meta.yaml"),
             r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
         )
         .unwrap();
@@ -857,7 +852,7 @@ mod tests {
     fn lookup_nested_simple_alias_works() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
-            tmp.path().join(".meta"),
+            tmp.path().join(".meta.yaml"),
             r#"{"projects": {"backend": "git@github.com:org/backend.git"}}"#,
         )
         .unwrap();
@@ -875,16 +870,16 @@ mod tests {
         let nested = vendor.join("nested-lib");
         std::fs::create_dir_all(&nested).unwrap();
 
-        // Root .meta - vendor is a nested meta repo (has repo URL + meta: true)
+        // Root .meta.yaml - vendor is a nested meta repo (has repo URL + meta: true)
         std::fs::write(
-            tmp.path().join(".meta"),
+            tmp.path().join(".meta.yaml"),
             r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
         )
         .unwrap();
 
-        // Nested .meta inside vendor (simulates what exists after cloning vendor)
+        // Nested .meta.yaml inside vendor (simulates what exists after cloning vendor)
         std::fs::write(
-            vendor.join(".meta"),
+            vendor.join(".meta.yaml"),
             r#"{"projects": {"nested-lib": "git@github.com:org/nested-lib.git"}}"#,
         )
         .unwrap();
@@ -900,7 +895,7 @@ mod tests {
         std::fs::create_dir(tmp.path().join("vendor")).unwrap();
 
         std::fs::write(
-            tmp.path().join(".meta"),
+            tmp.path().join(".meta.yaml"),
             r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
         )
         .unwrap();
@@ -916,7 +911,7 @@ mod tests {
     fn lookup_nested_unknown_simple_alias_fails() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
-            tmp.path().join(".meta"),
+            tmp.path().join(".meta.yaml"),
             r#"{"projects": {"backend": "git@github.com:org/backend.git"}}"#,
         )
         .unwrap();
@@ -937,12 +932,12 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
 
         std::fs::write(
-            tmp.path().join(".meta"),
+            tmp.path().join(".meta.yaml"),
             r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
         )
         .unwrap();
         std::fs::write(
-            vendor.join(".meta"),
+            vendor.join(".meta.yaml"),
             r#"{"projects": {"lib": "git@github.com:org/lib.git"}}"#,
         )
         .unwrap();
@@ -970,16 +965,16 @@ mod tests {
         let custom_path = vendor.join("packages/mylib");
         std::fs::create_dir_all(&custom_path).unwrap();
 
-        // Root .meta - vendor is a nested meta repo
+        // Root .meta.yaml - vendor is a nested meta repo
         std::fs::write(
-            tmp.path().join(".meta"),
+            tmp.path().join(".meta.yaml"),
             r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
         )
         .unwrap();
 
-        // Nested .meta with custom path
+        // Nested .meta.yaml with custom path
         std::fs::write(
-            vendor.join(".meta"),
+            vendor.join(".meta.yaml"),
             r#"{"projects": {"mylib": {"repo": "git@github.com:org/mylib.git", "path": "packages/mylib"}}}"#,
         )
         .unwrap();
@@ -1001,21 +996,21 @@ mod tests {
 
         // Root tracks vendor
         std::fs::write(
-            tmp.path().join(".meta"),
+            tmp.path().join(".meta.yaml"),
             r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
         )
         .unwrap();
 
         // Vendor tracks sub-vendor
         std::fs::write(
-            vendor.join(".meta"),
+            vendor.join(".meta.yaml"),
             r#"{"projects": {"sub-vendor": {"repo": "git@github.com:org/sub-vendor.git", "meta": true}}}"#,
         )
         .unwrap();
 
         // Sub-vendor tracks deep-lib
         std::fs::write(
-            sub_vendor.join(".meta"),
+            sub_vendor.join(".meta.yaml"),
             r#"{"projects": {"deep-lib": "git@github.com:org/deep-lib.git"}}"#,
         )
         .unwrap();
